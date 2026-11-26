@@ -1,0 +1,383 @@
+import AppKit
+import CoreImage
+import Foundation
+import ImageIO
+import UniformTypeIdentifiers
+
+struct LibraryPhoto: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var path: String
+    var bookmark: Data?
+    var added = Date()
+    /// Saved edits (nil = untouched). Edits are kept here, so the original file is never changed.
+    var edits: EditState?
+    var editedAt: Date?
+
+    var name: String { (path as NSString).lastPathComponent }
+    var isEdited: Bool { edits.map { !$0.isIdentity } ?? false }
+}
+
+struct Album: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var name: String
+    var photoIDs: [UUID] = []
+}
+
+struct Folder: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var name: String
+    var albums: [Album] = []
+    var expanded = true
+}
+
+enum LibrarySelection: Hashable {
+    case all
+    case edited
+    case folder(UUID)
+    case album(UUID)
+}
+
+/// The photo catalog: every imported photo with its edits, plus folders that hold albums.
+/// Saved as JSON in ~/Library/Application Support/Retouch Pro/.
+final class Library: ObservableObject {
+    static let shared = Library()
+
+    @Published private(set) var photos: [LibraryPhoto] = []
+    @Published private(set) var folders: [Folder] = []
+    @Published var selection: LibrarySelection = .all
+    /// Bumped when a photo's thumbnail changes so grids reload it.
+    @Published private(set) var thumbnailVersion: [UUID: Int] = [:]
+
+    private struct Stored: Codable {
+        var photos: [LibraryPhoto]
+        var folders: [Folder]
+    }
+
+    let directory: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = base.appendingPathComponent("Retouch Pro", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir.appendingPathComponent("Thumbnails"), withIntermediateDirectories: true)
+        return dir
+    }()
+    private var fileURL: URL { directory.appendingPathComponent("Library.json") }
+    private var saveWork: DispatchWorkItem?
+    private let ioQueue = DispatchQueue(label: "retouchpro.library", qos: .utility)
+
+    init() { load() }
+
+    // MARK: Persistence
+
+    private func load() {
+        guard let data = try? Data(contentsOf: fileURL),
+              let stored = try? JSONDecoder().decode(Stored.self, from: data) else { return }
+        photos = stored.photos
+        folders = stored.folders
+    }
+
+    /// Saves shortly after the last change (coalesces bursts of edits).
+    func setNeedsSave() {
+        saveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.saveNow() }
+        saveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+    }
+
+    func saveNow() {
+        saveWork?.cancel()
+        saveWork = nil
+        let stored = Stored(photos: photos, folders: folders)
+        let url = fileURL
+        ioQueue.async {
+            guard let data = try? JSONEncoder().encode(stored) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    // MARK: Lookup
+
+    func photo(_ id: UUID) -> LibraryPhoto? { photos.first { $0.id == id } }
+
+    func album(_ id: UUID) -> Album? {
+        for f in folders { if let a = f.albums.first(where: { $0.id == id }) { return a } }
+        return nil
+    }
+
+    func folder(containingAlbum id: UUID) -> Folder? {
+        folders.first { $0.albums.contains { $0.id == id } }
+    }
+
+    func photos(in selection: LibrarySelection) -> [LibraryPhoto] {
+        switch selection {
+        case .all:
+            return photos.sorted { $0.added > $1.added }
+        case .edited:
+            return photos.filter(\.isEdited).sorted { ($0.editedAt ?? $0.added) > ($1.editedAt ?? $1.added) }
+        case .folder(let id):
+            guard let f = folders.first(where: { $0.id == id }) else { return [] }
+            var seen = Set<UUID>()
+            let ids = f.albums.flatMap(\.photoIDs).filter { seen.insert($0).inserted }
+            return ids.compactMap(photo)
+        case .album(let id):
+            return album(id)?.photoIDs.compactMap(photo) ?? []
+        }
+    }
+
+    func title(for selection: LibrarySelection) -> String {
+        switch selection {
+        case .all: return "All Photos"
+        case .edited: return "Edited"
+        case .folder(let id): return folders.first { $0.id == id }?.name ?? "Folder"
+        case .album(let id): return album(id)?.name ?? "Album"
+        }
+    }
+
+    /// The file for a photo, following it if it was moved or renamed in Finder.
+    func url(for photo: LibraryPhoto) -> URL? {
+        let direct = URL(fileURLWithPath: photo.path)
+        if FileManager.default.fileExists(atPath: direct.path) { return direct }
+        guard let bookmark = photo.bookmark else { return nil }
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: bookmark, options: [.withoutUI], bookmarkDataIsStale: &stale),
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        if let i = photos.firstIndex(where: { $0.id == photo.id }) {
+            photos[i].path = url.path
+            if stale { photos[i].bookmark = try? url.bookmarkData() }
+            setNeedsSave()
+        }
+        return url
+    }
+
+    // MARK: Importing
+
+    static func isImage(_ url: URL) -> Bool {
+        guard let type = UTType(filenameExtension: url.pathExtension.lowercased()) else { return false }
+        return type.conforms(to: .image) || type.conforms(to: .rawImage)
+    }
+
+    /// Adds photos (and any photos inside dropped folders). Returns their IDs in order; already-imported
+    /// files are reused rather than duplicated.
+    @discardableResult
+    func importPhotos(_ urls: [URL], intoAlbum albumID: UUID? = nil) -> [UUID] {
+        var files: [URL] = []
+        for url in urls.map(DropHandler.resolve) {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                let items = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil,
+                                                           options: [.skipsHiddenFiles, .skipsPackageDescendants])
+                while files.count < 5000, let item = items?.nextObject() as? URL {
+                    if Self.isImage(item) { files.append(item) }
+                }
+            } else if Self.isImage(url) {
+                files.append(url)
+            }
+        }
+        var ids: [UUID] = []
+        for file in files.sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) {
+            if let existing = photos.first(where: { $0.path == file.path }) {
+                ids.append(existing.id)
+            } else {
+                let photo = LibraryPhoto(path: file.path, bookmark: try? file.bookmarkData())
+                photos.append(photo)
+                ids.append(photo.id)
+            }
+        }
+        if let albumID { add(ids, toAlbum: albumID) }
+        setNeedsSave()
+        return ids
+    }
+
+    func presentImportPanel(intoAlbum albumID: UUID?) -> [UUID] {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image, .rawImage, .folder]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.message = "Choose photos (or folders of photos) to add to your library"
+        panel.prompt = "Import"
+        guard panel.runModal() == .OK else { return [] }
+        return importPhotos(panel.urls, intoAlbum: albumID)
+    }
+
+    // MARK: Edits
+
+    func saveEdits(_ state: EditState, for id: UUID) {
+        guard let i = photos.firstIndex(where: { $0.id == id }) else { return }
+        let new: EditState? = state.isIdentity ? nil : state
+        guard photos[i].edits != new else { return }
+        photos[i].edits = new
+        photos[i].editedAt = Date()
+        setNeedsSave()
+    }
+
+    // MARK: Folders & albums
+
+    @discardableResult
+    func createFolder(named name: String = "New Folder") -> UUID {
+        let f = Folder(name: uniqueName(name, existing: folders.map(\.name)))
+        folders.append(f)
+        setNeedsSave()
+        return f.id
+    }
+
+    /// Creates an album inside a folder (a folder is created if none is given).
+    @discardableResult
+    func createAlbum(named name: String = "New Album", inFolder folderID: UUID?, photoIDs: [UUID] = []) -> UUID {
+        let fid = folderID ?? folders.first?.id ?? createFolder(named: "My Albums")
+        guard let fi = folders.firstIndex(where: { $0.id == fid }) else { return UUID() }
+        let album = Album(name: uniqueName(name, existing: folders[fi].albums.map(\.name)), photoIDs: photoIDs)
+        folders[fi].albums.append(album)
+        folders[fi].expanded = true
+        setNeedsSave()
+        return album.id
+    }
+
+    func rename(folder id: UUID, to name: String) {
+        guard let i = folders.firstIndex(where: { $0.id == id }), !name.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        folders[i].name = name
+        setNeedsSave()
+    }
+
+    func rename(album id: UUID, to name: String) {
+        guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        for fi in folders.indices {
+            if let ai = folders[fi].albums.firstIndex(where: { $0.id == id }) {
+                folders[fi].albums[ai].name = name
+                setNeedsSave()
+                return
+            }
+        }
+    }
+
+    func setExpanded(_ id: UUID, _ expanded: Bool) {
+        guard let i = folders.firstIndex(where: { $0.id == id }) else { return }
+        folders[i].expanded = expanded
+        setNeedsSave()
+    }
+
+    /// Deleting a folder or album never deletes photos — they stay in All Photos.
+    func delete(folder id: UUID) {
+        folders.removeAll { $0.id == id }
+        if case .folder(let s) = selection, s == id { selection = .all }
+        if case .album(let a) = selection, album(a) == nil { selection = .all }
+        setNeedsSave()
+    }
+
+    func delete(album id: UUID) {
+        for fi in folders.indices { folders[fi].albums.removeAll { $0.id == id } }
+        if case .album(let s) = selection, s == id { selection = .all }
+        setNeedsSave()
+    }
+
+    func moveAlbum(_ id: UUID, toFolder folderID: UUID) {
+        guard let album = album(id), let target = folders.firstIndex(where: { $0.id == folderID }) else { return }
+        for fi in folders.indices { folders[fi].albums.removeAll { $0.id == id } }
+        folders[target].albums.append(album)
+        setNeedsSave()
+    }
+
+    func add(_ photoIDs: [UUID], toAlbum albumID: UUID) {
+        for fi in folders.indices {
+            if let ai = folders[fi].albums.firstIndex(where: { $0.id == albumID }) {
+                for id in photoIDs where !folders[fi].albums[ai].photoIDs.contains(id) {
+                    folders[fi].albums[ai].photoIDs.append(id)
+                }
+                setNeedsSave()
+                return
+            }
+        }
+    }
+
+    func remove(_ photoIDs: [UUID], fromAlbum albumID: UUID) {
+        for fi in folders.indices {
+            if let ai = folders[fi].albums.firstIndex(where: { $0.id == albumID }) {
+                folders[fi].albums[ai].photoIDs.removeAll { photoIDs.contains($0) }
+                setNeedsSave()
+                return
+            }
+        }
+    }
+
+    /// Removes photos from the library (and every album). The files on disk are not touched.
+    func removeFromLibrary(_ photoIDs: [UUID]) {
+        photos.removeAll { photoIDs.contains($0.id) }
+        for fi in folders.indices {
+            for ai in folders[fi].albums.indices {
+                folders[fi].albums[ai].photoIDs.removeAll { photoIDs.contains($0) }
+            }
+        }
+        for id in photoIDs {
+            try? FileManager.default.removeItem(at: editedThumbnailURL(id))
+            ThumbnailCache.shared.forget(id)
+        }
+        setNeedsSave()
+    }
+
+    private func uniqueName(_ base: String, existing: [String]) -> String {
+        var name = base, n = 2
+        while existing.contains(name) { name = "\(base) \(n)"; n += 1 }
+        return name
+    }
+
+    // MARK: Thumbnails
+
+    func editedThumbnailURL(_ id: UUID) -> URL {
+        directory.appendingPathComponent("Thumbnails").appendingPathComponent("\(id.uuidString).jpg")
+    }
+
+    /// Stores a thumbnail that shows the photo's edits.
+    func storeEditedThumbnail(_ image: CGImage?, for id: UUID) {
+        let url = editedThumbnailURL(id)
+        if let image {
+            if let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) {
+                CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
+                CGImageDestinationFinalize(dest)
+            }
+        } else {
+            try? FileManager.default.removeItem(at: url)
+        }
+        ThumbnailCache.shared.forget(id)
+        DispatchQueue.main.async {
+            self.thumbnailVersion[id, default: 0] += 1
+        }
+    }
+}
+
+/// Loads small previews for the library grid and filmstrip, in the background.
+final class ThumbnailCache {
+    static let shared = ThumbnailCache()
+    private let cache = NSCache<NSString, NSImage>()
+    private let queue = DispatchQueue(label: "retouchpro.thumbs", qos: .userInitiated, attributes: .concurrent)
+
+    func forget(_ id: UUID) {
+        cache.removeObject(forKey: id.uuidString as NSString)
+    }
+
+    func thumbnail(for photo: LibraryPhoto, completion: @escaping (NSImage?) -> Void) {
+        let key = photo.id.uuidString as NSString
+        if let hit = cache.object(forKey: key) { completion(hit); return }
+        let library = Library.shared
+        let editedURL = library.editedThumbnailURL(photo.id)
+        let fileURL = URL(fileURLWithPath: photo.path)
+        let bookmarkURL: () -> URL? = { library.url(for: photo) }
+        queue.async {
+            var image: NSImage?
+            if photo.isEdited, let edited = NSImage(contentsOf: editedURL) {
+                image = edited
+            } else {
+                var source = CGImageSourceCreateWithURL(fileURL as CFURL, nil)
+                if source == nil, let moved = DispatchQueue.main.sync(execute: bookmarkURL) {
+                    source = CGImageSourceCreateWithURL(moved as CFURL, nil)
+                }
+                if let source,
+                   let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                       kCGImageSourceCreateThumbnailFromImageAlways: true,
+                       kCGImageSourceCreateThumbnailWithTransform: true,
+                       kCGImageSourceThumbnailMaxPixelSize: 420,
+                   ] as CFDictionary) {
+                    image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                }
+            }
+            if let image { self.cache.setObject(image, forKey: key) }
+            DispatchQueue.main.async { completion(image) }
+        }
+    }
+}

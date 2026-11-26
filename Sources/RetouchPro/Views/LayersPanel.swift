@@ -59,6 +59,32 @@ struct AddLayerMenu: View {
 
     var body: some View {
         Menu {
+            Section("Mask automatically") {
+                ForEach(MaskMode.automatic) { mode in
+                    Button {
+                        model.addLayer(.auto(mode))
+                    } label: {
+                        Label("Select \(mode.rawValue)", systemImage: mode.icon)
+                    }
+                }
+            }
+            Section("Mask by hand") {
+                Button {
+                    model.addLayer(.adjustment)
+                    model.updateSelectedLayer { $0.mask.mode = .brush; $0.name = "Brush Mask" }
+                    model.commit()
+                } label: { Label("Brush Mask", systemImage: MaskMode.brush.icon) }
+                Button {
+                    model.addLayer(.adjustment)
+                    model.updateSelectedLayer { $0.mask.mode = .linear; $0.name = "Gradient Mask" }
+                    model.commit()
+                } label: { Label("Gradient Mask", systemImage: MaskMode.linear.icon) }
+                Button {
+                    model.addLayer(.adjustment)
+                    model.updateSelectedLayer { $0.mask.mode = .radial; $0.name = "Radial Mask" }
+                    model.commit()
+                } label: { Label("Radial Mask", systemImage: MaskMode.radial.icon) }
+            }
             Section("Adjust an area") {
                 Button("Adjustment Layer") { model.addLayer(.adjustment) }
                 Button("Brighten (radial)") { model.addLayer(.brightenFaces) }
@@ -373,26 +399,61 @@ private struct LayerProperties: View {
                 Toggle("Edit mask on the photo", isOn: $model.editingMask)
                     .font(.system(size: 12))
             }
-            Picker("", selection: committing(\.mask.mode)) {
-                ForEach(MaskMode.allCases) { Text($0.rawValue).tag($0) }
+            Picker("", selection: Binding(
+                get: { layer.mask.mode.isAutomatic ? MaskMode.none : layer.mask.mode },
+                set: { mode in model.updateSelectedLayer { $0.mask.mode = mode }; model.commit() })) {
+                ForEach(MaskMode.manual) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .opacity(layer.mask.mode.isAutomatic ? 0.55 : 1)
+
+            HStack(spacing: 6) {
+                ForEach(MaskMode.automatic) { mode in
+                    Button {
+                        model.refineAutoMask = false
+                        model.applyAutoMask(mode)
+                    } label: {
+                        VStack(spacing: 3) {
+                            Image(systemName: mode.icon).font(.system(size: 13))
+                            Text(mode.rawValue).font(.system(size: 9.5, weight: .medium)).lineLimit(1).minimumScaleFactor(0.8)
+                        }
+                        .foregroundColor(layer.mask.mode == mode ? .white : .rpCharcoal)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 42)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(layer.mask.mode == mode ? Color.rpAccent : Color.rpPaper))
+                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.rpMist))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Automatically select \(mode.rawValue.lowercased())")
+                }
+            }
+            .disabled(model.isDetecting)
+
+            if model.isDetecting {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Finding \(layer.mask.mode.isAutomatic ? layer.mask.mode.rawValue.lowercased() : "selection")…")
+                        .font(.system(size: 11))
+                        .foregroundColor(.rpInk)
+                }
+            }
+            if let message = model.autoMaskMessage {
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             switch layer.mask.mode {
             case .none:
-                Text(layer.isContent ? "The layer is fully visible." : "The adjustment applies to the whole photo.")
+                Text(layer.isContent ? "The layer is fully visible." : "The adjustment applies to the whole photo. Pick a mask above to limit it.")
                     .font(.system(size: 11))
                     .foregroundColor(.rpSlate)
+                    .fixedSize(horizontal: false, vertical: true)
             case .brush:
-                Picker("", selection: $model.maskErase) {
-                    Label("Paint", systemImage: "paintbrush.pointed").tag(false)
-                    Label("Erase", systemImage: "eraser").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                RPSlider(title: "Brush Size", value: $model.maskBrushSize, range: 5...400, defaultValue: 60,
-                         format: { "\(Int($0.rounded())) pt" }, onCommit: {})
+                brushControls
                 RPSlider(title: "Feather", value: binding(\.mask.feather), range: 0...100, defaultValue: 40,
                          format: { "\(Int($0.rounded()))" }, onCommit: { model.commit() })
             case .linear:
@@ -402,6 +463,8 @@ private struct LayerProperties: View {
             case .radial:
                 RPSlider(title: "Feather", value: binding(\.mask.feather), range: 0...100, defaultValue: 40,
                          format: { "\(Int($0.rounded()))" }, onCommit: { model.commit() })
+            case .people, .sky, .subject, .background:
+                autoControls
             }
 
             if layer.mask.mode != .none {
@@ -409,8 +472,8 @@ private struct LayerProperties: View {
                     Toggle("Invert", isOn: committing(\.mask.inverted))
                     Toggle("Show mask", isOn: $model.showMaskOverlay)
                     Spacer()
-                    if layer.mask.mode == .brush {
-                        Button("Clear") {
+                    if layer.mask.mode == .brush || layer.mask.mode.isAutomatic {
+                        Button(layer.mask.mode.isAutomatic ? "Clear Touch-ups" : "Clear") {
                             model.updateSelectedLayer { $0.mask.strokes = [] }
                             model.commit()
                         }
@@ -421,6 +484,62 @@ private struct LayerProperties: View {
                 .font(.system(size: 12))
             }
         }
+    }
+
+    private var brushControls: some View {
+        VStack(spacing: 10) {
+            Picker("", selection: $model.maskErase) {
+                Label("Paint", systemImage: "paintbrush.pointed").tag(false)
+                Label("Erase", systemImage: "eraser").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            RPSlider(title: "Brush Size", value: $model.maskBrushSize, range: 5...400, defaultValue: 60,
+                     format: { "\(Int($0.rounded())) pt" }, onCommit: {})
+        }
+    }
+
+    @ViewBuilder
+    private var autoControls: some View {
+        let mode = layer.mask.mode
+        Text(mode.autoDescription)
+            .font(.system(size: 11))
+            .foregroundColor(.rpSlate)
+            .fixedSize(horizontal: false, vertical: true)
+        if mode.hasInstances && layer.mask.autoInstanceCount > 0 {
+            let total = layer.mask.autoInstanceCount
+            let included = total - layer.mask.autoExcluded.count
+            HStack {
+                Label("\(included) of \(total) \(mode == .people ? (total == 1 ? "person" : "people") : (total == 1 ? "subject" : "subjects")) selected",
+                      systemImage: mode.icon)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.rpInk)
+                Spacer()
+                if !layer.mask.autoExcluded.isEmpty {
+                    Button("Select All") { model.includeAllAutoInstances() }
+                        .buttonStyle(RPButtonStyle())
+                }
+            }
+        }
+        if mode == .sky {
+            RPSlider(title: "Sensitivity", value: binding(\.mask.autoSensitivity), range: 0...100, defaultValue: 50,
+                     format: { "\(Int($0.rounded()))" },
+                     onCommit: { model.applyAutoMask(.sky) })
+                .help("Lower if the selection spills into buildings, water or haze; higher to reach further into clouds")
+        }
+        Toggle("Touch up with a brush", isOn: $model.refineAutoMask)
+            .font(.system(size: 12))
+        if model.refineAutoMask || !mode.hasInstances {
+            brushControls
+        }
+        RPSlider(title: "Edge Softness", value: binding(\.mask.feather), range: 0...100, defaultValue: 20,
+                 format: { "\(Int($0.rounded()))" }, onCommit: { model.commit() })
+        Button {
+            model.applyAutoMask(mode)
+        } label: {
+            Label("Detect Again", systemImage: "arrow.clockwise")
+        }
+        .buttonStyle(RPButtonStyle())
     }
 
     // MARK: Helpers

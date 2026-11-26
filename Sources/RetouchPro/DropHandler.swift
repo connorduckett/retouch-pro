@@ -50,6 +50,31 @@ enum DropHandler {
         return false
     }
 
+    /// Collects every dropped photo (files and image-only items) and calls `completion` once with all of them.
+    @discardableResult
+    static func handleAll(_ providers: [NSItemProvider], completion: @escaping ([URL]) -> Void) -> Bool {
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var results: [(Int, URL)] = []
+        var accepted = false
+        for (index, provider) in providers.enumerated() {
+            let hasFile = provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+            let hasImage = preferredImageType(provider.registeredTypeIdentifiers.compactMap(UTType.init)) != nil
+            guard hasFile || hasImage else { continue }
+            accepted = true
+            group.enter()
+            handle([provider], open: { url in
+                lock.lock(); results.append((index, url)); lock.unlock()
+                group.leave()
+            }, failed: { _ in group.leave() })
+        }
+        guard accepted else { return false }
+        group.notify(queue: .main) {
+            completion(results.sorted { $0.0 < $1.0 }.map(\.1))
+        }
+        return true
+    }
+
     /// File reference URLs (`/.file/id=…`) → normal file paths.
     static func resolve(_ url: URL) -> URL {
         guard url.isFileURL else { return url }
@@ -65,9 +90,11 @@ enum DropHandler {
         return nil
     }
 
+    /// Images that arrive without a file (dragged from Photos, a browser…) are kept in the library folder
+    /// so they stay available after a restart.
     private static func keepCopy(of url: URL, type: UTType, suggestedName: String?) throws -> URL {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("Retouch Pro Drops", isDirectory: true)
+        let dir = Library.shared.directory
+            .appendingPathComponent("Imported", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var name = (suggestedName?.isEmpty == false ? suggestedName! : url.deletingPathExtension().lastPathComponent)

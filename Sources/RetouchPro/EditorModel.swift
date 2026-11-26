@@ -78,20 +78,92 @@ final class EditorModel: ObservableObject {
 
     static let supportedTypes: [UTType] = [.image, .rawImage, .jpeg, .png, .heic, .tiff]
 
+    // MARK: Library integration
+
+    enum Mode { case library, edit }
+    @Published var mode: Mode = Library.shared.photos.isEmpty ? .edit : .library
+    /// The library photo being edited (edits are saved to it automatically).
+    @Published private(set) var currentPhotoID: UUID?
+    private var persistWork: DispatchWorkItem?
+
+    /// The album currently chosen in the library, if any (imports go there).
+    var currentAlbumID: UUID? {
+        if case .album(let id) = Library.shared.selection { return id }
+        return nil
+    }
+
     func presentOpenPanel() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = Self.supportedTypes
-        panel.allowsMultipleSelection = false
-        panel.message = "Choose a photo to edit"
-        panel.prompt = "Open"
-        if panel.runModal() == .OK, let url = panel.url {
-            open(url: url)
+        let ids = Library.shared.presentImportPanel(intoAlbum: currentAlbumID)
+        if ids.count == 1 { openPhoto(ids[0]) }
+        else if ids.count > 1 { mode = .library }
+    }
+
+    /// Opens files dropped or chosen outside the library: they're added to it first.
+    func open(url rawURL: URL) {
+        openFiles([rawURL])
+    }
+
+    func openFiles(_ urls: [URL]) {
+        let ids = Library.shared.importPhotos(urls, intoAlbum: mode == .library ? currentAlbumID : nil)
+        if ids.count == 1 { openPhoto(ids[0]) }
+        else if ids.count > 1 { mode = .library }
+        else if let first = urls.first {
+            loadError = "Retouch Pro couldn't open “\(first.lastPathComponent)”. Try a JPEG, PNG, HEIC, TIFF or camera RAW file."
         }
     }
 
-    func open(url rawURL: URL) {
-        let url = DropHandler.resolve(rawURL)
-        guard confirmDiscardIfNeeded() else { return }
+    /// Opens a library photo in the editor with its saved edits.
+    func openPhoto(_ id: UUID) {
+        guard let photo = Library.shared.photo(id) else { return }
+        if id == currentPhotoID, hasImage { mode = .edit; return }
+        guard let url = Library.shared.url(for: photo) else {
+            loadError = "“\(photo.name)” can’t be found. It may have been moved or deleted."
+            return
+        }
+        flushEdits()
+        mode = .edit
+        load(url: url, photoID: id, initialState: photo.edits ?? EditState())
+    }
+
+    /// Moves to the previous/next photo in the current library collection.
+    func stepPhoto(_ delta: Int) {
+        let photos = Library.shared.photos(in: Library.shared.selection)
+        guard !photos.isEmpty else { return }
+        let i = photos.firstIndex { $0.id == currentPhotoID } ?? -1
+        let j = min(max(0, i + delta), photos.count - 1)
+        if j != i { openPhoto(photos[j].id) }
+    }
+
+    /// Saves the current photo's edits to the library (soon, coalescing rapid changes).
+    private func persistEdits() {
+        guard currentPhotoID != nil else { return }
+        persistWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.flushEdits() }
+        persistWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    /// Saves now, and refreshes the photo's library thumbnail to show the edits.
+    func flushEdits() {
+        persistWork?.cancel()
+        persistWork = nil
+        guard let id = currentPhotoID, let proxy = sourceProxy else { return }
+        let state = self.state
+        let before = Library.shared.photo(id)?.edits ?? EditState()
+        Library.shared.saveEdits(state, for: id)
+        guard before != state else { return }
+        workQueue.async {
+            if state.isIdentity {
+                Library.shared.storeEditedThumbnail(nil, for: id)
+                return
+            }
+            let small = ImagePipeline.scaled(proxy, toMaxDimension: 420)
+            let cg = ImagePipeline.cgImage(ImagePipeline.render(source: small, state: state), colorSpace: ImagePipeline.sRGB)
+            Library.shared.storeEditedThumbnail(cg, for: id)
+        }
+    }
+
+    private func load(url: URL, photoID: UUID?, initialState: EditState) {
         let token = UUID()
         loadToken = token
         isLoading = true
@@ -123,14 +195,15 @@ final class EditorModel: ObservableObject {
                 self.isRaw = ImagePipeline.isRaw(url)
                 self.fileURL = url
                 self.originalPreview = originalNS
-                self.history = [EditState()]
+                self.currentPhotoID = photoID
+                self.history = [initialState]
                 self.historyIndex = 0
                 self.hasUnexportedChanges = false
                 self.zoom = 1
                 self.tool = .adjust
                 self.lookThumbnails = [:]
                 self.preview = nil
-                self.state = EditState()
+                self.state = initialState
                 self.selectedLayerID = nil
                 self.isLoading = false
                 self.scheduleRender()
@@ -141,7 +214,7 @@ final class EditorModel: ObservableObject {
     }
 
     private func confirmDiscardIfNeeded() -> Bool {
-        guard hasImage, hasUnexportedChanges else { return true }
+        guard hasImage, hasUnexportedChanges, currentPhotoID == nil else { return true }
         if UserDefaults.standard.object(forKey: SettingsKey.confirmDiscard) != nil,
            !UserDefaults.standard.bool(forKey: SettingsKey.confirmDiscard) { return true }
         let alert = NSAlert()
@@ -165,6 +238,8 @@ final class EditorModel: ObservableObject {
 
     func close() {
         guard confirmDiscardIfNeeded() else { return }
+        flushEdits()
+        currentPhotoID = nil
         loadToken = UUID()
         sourceFull = nil; sourceProxy = nil; healEngine = nil
         fileURL = nil; preview = nil; originalPreview = nil
@@ -182,6 +257,7 @@ final class EditorModel: ObservableObject {
         history = Array(history.prefix(historyIndex + 1)) + [state]
         historyIndex = history.count - 1
         hasUnexportedChanges = true
+        persistEdits()
     }
 
     func apply(_ change: (inout EditState) -> Void) {
@@ -196,6 +272,7 @@ final class EditorModel: ObservableObject {
         historyIndex -= 1
         state = history[historyIndex]
         hasUnexportedChanges = true
+        persistEdits()
     }
 
     func redo() {
@@ -203,6 +280,7 @@ final class EditorModel: ObservableObject {
         historyIndex += 1
         state = history[historyIndex]
         hasUnexportedChanges = true
+        persistEdits()
     }
 
     func resetAll() {
@@ -472,14 +550,110 @@ final class EditorModel: ObservableObject {
         state = s
     }
 
+    // MARK: Automatic selections
+
+    /// Lives on `workQueue` only.
+    private var autoMasker: AutoMasker?
+    private var autoMaskerToken: UUID?
+    @Published private(set) var isDetecting = false
+    @Published var autoMaskMessage: String?
+    /// When on, the canvas paints/erases to touch up an automatic selection instead of picking people.
+    @Published var refineAutoMask = false
+
+    /// Detects people / sky / subject / background and sets it as the layer's mask.
+    func applyAutoMask(_ mode: MaskMode, toLayer id: UUID? = nil) {
+        guard mode.isAutomatic, let proxy = sourceProxy, let layerID = id ?? selectedLayerID else { return }
+        let token = loadToken
+        let current = state.layers.first { $0.id == layerID }?.mask
+        let excluded = current?.mode == mode ? current?.autoExcluded ?? [] : []
+        let sensitivity = current?.autoSensitivity ?? 50
+        isDetecting = true
+        autoMaskMessage = nil
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            if self.autoMasker == nil || self.autoMaskerToken != token {
+                self.autoMasker = AutoMasker(source: proxy)
+                self.autoMaskerToken = token
+            }
+            let result = self.autoMasker?.mask(mode, excluding: excluded, sensitivity: sensitivity)
+            DispatchQueue.main.async {
+                self.isDetecting = false
+                guard self.loadToken == token, let i = self.state.layers.firstIndex(where: { $0.id == layerID }) else { return }
+                guard let result else {
+                    self.autoMaskMessage = "Retouch Pro couldn’t analyze this photo."
+                    return
+                }
+                if mode.hasInstances && result.instanceCount == 0 {
+                    self.autoMaskMessage = mode == .people ? "No people were found in this photo." : "No clear subject was found in this photo."
+                }
+                self.apply {
+                    $0.layers[i].mask.mode = mode
+                    $0.layers[i].mask.autoMaskPNG = result.png
+                    $0.layers[i].mask.autoExcluded = excluded
+                    $0.layers[i].mask.autoInstanceCount = result.instanceCount
+                }
+                self.showMaskOverlay = true
+            }
+        }
+    }
+
+    /// Clicking a person or subject on the photo removes it from (or adds it back to) the selection.
+    func toggleAutoInstance(atDisplayPoint point: CGPoint) {
+        guard let layer = selectedLayer, layer.mask.mode.hasInstances, fullSize != .zero else { return }
+        let mode = layer.mask.mode, layerID = layer.id, token = loadToken
+        let src = displayToSource(point)
+        let maxDim = max(fullSize.width, fullSize.height)
+        let fx = Double(src.x * maxDim / fullSize.width)
+        let fyTop = 1 - Double(src.y * maxDim / fullSize.height)
+        var excluded = layer.mask.autoExcluded
+        isDetecting = true
+        workQueue.async { [weak self] in
+            guard let self, let masker = self.autoMasker, self.autoMaskerToken == token else {
+                DispatchQueue.main.async { self?.isDetecting = false }
+                return
+            }
+            guard let hit = masker.instance(mode, atX: fx, y: fyTop) else {
+                DispatchQueue.main.async {
+                    self.isDetecting = false
+                    self.autoMaskMessage = "Click directly on a \(mode == .people ? "person" : "subject") to include or exclude them."
+                }
+                return
+            }
+            if let k = excluded.firstIndex(of: hit) { excluded.remove(at: k) } else { excluded.append(hit) }
+            let result = masker.mask(mode, excluding: excluded)
+            DispatchQueue.main.async {
+                self.isDetecting = false
+                self.autoMaskMessage = nil
+                guard let result, let i = self.state.layers.firstIndex(where: { $0.id == layerID }) else { return }
+                self.apply {
+                    $0.layers[i].mask.autoMaskPNG = result.png
+                    $0.layers[i].mask.autoExcluded = excluded
+                }
+            }
+        }
+    }
+
+    func includeAllAutoInstances() {
+        guard let layer = selectedLayer else { return }
+        updateSelectedLayer { $0.mask.autoExcluded = [] }
+        applyAutoMask(layer.mask.mode)
+    }
+
     enum NewLayer {
+        case auto(MaskMode)
         case adjustment, removeShadows, removeSunSpots, smoothSkinSpots, brightenFaces
         case text, shape(ShapeKind), path
     }
 
     func addLayer(_ kind: NewLayer) {
         var layer: Layer
+        var autoMode: MaskMode?
         switch kind {
+        case .auto(let mode):
+            layer = Layer(name: mode.rawValue, kind: .adjustment)
+            layer.mask.mode = mode
+            layer.mask.feather = 20
+            autoMode = mode
         case .adjustment:
             layer = Layer(name: "Adjustment", kind: .adjustment)
         case .removeShadows:
@@ -533,6 +707,10 @@ final class EditorModel: ObservableObject {
         apply { $0.layers.insert(layer, at: insertAt) }
         selectedLayerID = layer.id
         if tool != .layers { tool = .layers }
+        if let autoMode {
+            refineAutoMask = false
+            applyAutoMask(autoMode, toLayer: layer.id)
+        }
     }
 
     func deleteSelectedLayer() {
@@ -569,7 +747,7 @@ final class EditorModel: ObservableObject {
         let pts = displayPoints.map(displayToSource).map { [Double($0.x), Double($0.y)] }
         let r = displayLengthToSource(maskBrushSize / 2, displayWidth: displaySize.width)
         apply {
-            $0.layers[i].mask.mode = .brush
+            if !$0.layers[i].mask.mode.isAutomatic { $0.layers[i].mask.mode = .brush }
             $0.layers[i].mask.strokes.append(MaskStroke(points: pts, radius: r, erase: maskErase))
         }
     }

@@ -102,6 +102,13 @@ struct CanvasView: View {
         }
         switch layer.mask.mode {
         case .brush: return model.maskErase ? "Paint to erase where this layer applies" : "Paint where this layer should apply"
+        case .people, .subject:
+            if model.isDetecting { return "Finding \(layer.mask.mode.rawValue.lowercased())…" }
+            if model.refineAutoMask { return model.maskErase ? "Paint to remove from the selection" : "Paint to add to the selection" }
+            return "Click a \(layer.mask.mode == .people ? "person" : "subject") to leave them out or add them back"
+        case .sky, .background:
+            if model.isDetecting { return "Finding \(layer.mask.mode.rawValue.lowercased())…" }
+            return model.maskErase ? "Paint to remove from the selection" : "Paint to add to the selection"
         case .linear: return "Drag the two handles to set the gradient"
         case .radial: return "Drag the center to move · drag the edge handles to resize"
         case .none: return nil

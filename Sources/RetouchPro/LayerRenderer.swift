@@ -1,5 +1,6 @@
 import AppKit
 import CoreImage
+import ImageIO
 
 /// Renders adjustment layers, layer masks, text, shapes and pen paths.
 enum LayerRenderer {
@@ -111,6 +112,16 @@ enum LayerRenderer {
         switch m.mode {
         case .none:
             return nil
+        case .people, .sky, .subject, .background:
+            guard let png = m.autoMaskPNG, let base = decodeMask(png) else { return CIImage(color: .black).cropped(to: ctx.extent) }
+            // Brush strokes refine the automatic selection.
+            img = brushMask(m.strokes, sourceSize: ctx.sourceSize, scale: s, base: base)
+            let feather = m.feather / 100 * s * 0.008
+            if feather > 0.5 {
+                img = img.clampedToExtent()
+                    .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: feather])
+                    .cropped(to: sourceRect)
+            }
         case .brush:
             img = brushMask(m.strokes, sourceSize: ctx.sourceSize, scale: s)
             let feather = m.feather / 100 * s * 0.02
@@ -152,7 +163,25 @@ enum LayerRenderer {
         return out
     }
 
-    private static func brushMask(_ strokes: [MaskStroke], sourceSize: CGSize, scale: CGFloat) -> CIImage {
+    private static let maskLock = NSLock()
+    private static var decodedMasks: [Int: CGImage] = [:]
+
+    private static func decodeMask(_ png: Data) -> CGImage? {
+        let key = png.hashValue ^ png.count
+        maskLock.lock()
+        if let hit = decodedMasks[key] { maskLock.unlock(); return hit }
+        maskLock.unlock()
+        guard let src = CGImageSourceCreateWithData(png as CFData, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        maskLock.lock()
+        if decodedMasks.count > 16 { decodedMasks.removeAll() }
+        decodedMasks[key] = cg
+        maskLock.unlock()
+        return cg
+    }
+
+    private static func brushMask(_ strokes: [MaskStroke], sourceSize: CGSize, scale: CGFloat,
+                                  base: CGImage? = nil) -> CIImage {
         let k = min(1, 2048 / max(sourceSize.width, sourceSize.height))
         let w = max(1, Int(sourceSize.width * k)), h = max(1, Int(sourceSize.height * k))
         let gray = CGColorSpaceCreateDeviceGray()
@@ -160,6 +189,10 @@ enum LayerRenderer {
                                   space: gray, bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return CIImage.empty() }
         ctx.setFillColor(gray: 0, alpha: 1)
         ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        if let base {
+            ctx.interpolationQuality = .high
+            ctx.draw(base, in: CGRect(x: 0, y: 0, width: w, height: h))
+        }
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
         for stroke in strokes {

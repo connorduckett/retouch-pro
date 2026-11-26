@@ -29,12 +29,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { Updater.shared.checkOnLaunchIfNeeded() }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        EditorModel.shared.flushEdits()
+        Library.shared.saveNow()
+        Thread.sleep(forTimeInterval: 0.3)   // let the background save finish
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        if let url = urls.first {
-            EditorModel.shared.open(url: url)
-        }
+        EditorModel.shared.openFiles(urls)
     }
 }
 
@@ -46,8 +50,22 @@ struct EditorCommands: Commands {
             Button("Check for Updates…") { Updater.shared.check(userInitiated: true) }
         }
         CommandGroup(replacing: .newItem) {
-            Button("Open Photo…") { model.presentOpenPanel() }
+            Button("Import Photos…") { model.presentOpenPanel() }
                 .keyboardShortcut("o")
+            Button("Import into Library…") {
+                model.mode = .library
+                _ = Library.shared.presentImportPanel(intoAlbum: model.currentAlbumID)
+            }
+            .keyboardShortcut("i", modifiers: [.command, .shift])
+            Divider()
+            Button("New Folder") { model.mode = .library; Library.shared.createFolder() }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+            Button("New Album") {
+                model.mode = .library
+                let id = Library.shared.createAlbum(inFolder: nil)
+                Library.shared.selection = .album(id)
+            }
+            .keyboardShortcut("n", modifiers: [.command, .option])
             Divider()
             Button("Export…") { NotificationCenter.default.post(name: .showExport, object: nil) }
                 .keyboardShortcut("e")
@@ -79,6 +97,17 @@ struct EditorCommands: Commands {
             Button("Reset All Edits") { model.resetAll() }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
                 .disabled(!model.hasImage)
+        }
+        CommandGroup(before: .sidebar) {
+            Button(model.mode == .library ? "Show Editor" : "Show Library") {
+                model.mode = model.mode == .library ? .edit : .library
+            }
+            .keyboardShortcut("l")
+            Button("Previous Photo") { model.stepPhoto(-1) }
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+            Button("Next Photo") { model.stepPhoto(1) }
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+            Divider()
         }
         CommandMenu("Image") {
             ForEach(Tool.allCases) { tool in

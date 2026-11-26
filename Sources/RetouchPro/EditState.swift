@@ -115,7 +115,38 @@ enum TextAlign: String, Codable, CaseIterable, Identifiable {
 
 enum MaskMode: String, Codable, CaseIterable, Identifiable {
     case none = "Whole Photo", brush = "Brush", linear = "Gradient", radial = "Radial"
+    // Automatic (AI) selections
+    case people = "People", sky = "Sky", subject = "Subject", background = "Background"
     var id: String { rawValue }
+
+    static let manual: [MaskMode] = [.none, .brush, .linear, .radial]
+    static let automatic: [MaskMode] = [.people, .sky, .subject, .background]
+    var isAutomatic: Bool { MaskMode.automatic.contains(self) }
+    /// Automatic selections made of separate things you can click to include or exclude.
+    var hasInstances: Bool { self == .people || self == .subject }
+
+    var icon: String {
+        switch self {
+        case .none: return "rectangle"
+        case .brush: return "paintbrush.pointed"
+        case .linear: return "square.bottomhalf.filled"
+        case .radial: return "circle.dashed"
+        case .people: return "person.2"
+        case .sky: return "cloud.sun"
+        case .subject: return "viewfinder"
+        case .background: return "mountain.2"
+        }
+    }
+
+    var autoDescription: String {
+        switch self {
+        case .people: return "Finds every person in the photo. Click a person to leave them out or add them back."
+        case .sky: return "Finds the sky, including around the horizon and through gaps."
+        case .subject: return "Finds the main subjects — people, pets and objects. Click one to leave it out or add it back."
+        case .background: return "Everything except the people and main subjects."
+        default: return ""
+        }
+    }
 }
 
 /// A brush stroke on a layer mask, in source-photo coordinates (normalized by the longest side, y-up).
@@ -138,6 +169,13 @@ struct LayerMask: Equatable, Codable {
     var center: [Double] = [0.5, 0.33]
     var radiusX: Double = 0.18
     var radiusY: Double = 0.18
+    /// Automatic selection result: grayscale PNG covering the original photo (top row = top of photo).
+    var autoMaskPNG: Data? = nil
+    /// Which detected people/subjects are included (indexes), or empty for all of them.
+    var autoExcluded: [Int] = []
+    var autoInstanceCount: Int = 0
+    /// Sky only: how far the selection reaches into clouds and haze (0…100).
+    var autoSensitivity: Double = 50
 }
 
 /// A layer stacked on top of the photo. Text, shape and path geometry is stored relative to the

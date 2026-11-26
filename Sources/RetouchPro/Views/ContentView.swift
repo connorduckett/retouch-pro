@@ -10,19 +10,25 @@ struct ContentView: View {
         VStack(spacing: 0) {
             TopBar(showExport: $showExport)
             Rectangle().fill(Color.rpMist).frame(height: 1)
+            if model.mode == .library {
+                LibraryView()
+            } else {
             HStack(spacing: 0) {
                 ToolRail()
                 Rectangle().fill(Color.rpMist).frame(width: 1)
-                ZStack {
-                    Color.rpMist
-                    if model.hasImage {
-                        CanvasView()
-                    } else if !model.isLoading {
-                        EmptyStateView(targeted: dropTargeted)
+                VStack(spacing: 0) {
+                    ZStack {
+                        Color.rpMist
+                        if model.hasImage {
+                            CanvasView()
+                        } else if !model.isLoading {
+                            EmptyStateView(targeted: dropTargeted)
+                        }
+                        if model.isLoading {
+                            LoadingBadge()
+                        }
                     }
-                    if model.isLoading {
-                        LoadingBadge()
-                    }
+                    Filmstrip()
                 }
                 if model.hasImage {
                     Rectangle().fill(Color.rpMist).frame(width: 1)
@@ -30,12 +36,14 @@ struct ContentView: View {
                         .frame(width: 300)
                 }
             }
+            }
         }
         .background(Color.rpPaper)
         .onDrop(of: DropHandler.acceptedTypes, isTargeted: $dropTargeted) { providers in
-            DropHandler.handle(providers,
-                               open: { model.open(url: $0) },
-                               failed: { model.loadError = $0 })
+            DropHandler.handleAll(providers) { urls in
+                if urls.isEmpty { model.loadError = "The dropped item couldn't be opened." }
+                else { model.openFiles(urls) }
+            }
         }
         .sheet(isPresented: $showExport) {
             ExportSheet(isPresented: $showExport)

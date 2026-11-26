@@ -67,6 +67,25 @@ private struct MaskEditor: View {
             linear
         case .radial:
             radial
+        case .people, .subject:
+            if model.refineAutoMask {
+                BrushOverlay(size: size, diameter: model.maskBrushSize, tint: model.maskErase ? .white : .red) { pts in
+                    model.addMaskStroke(displayPoints: pts, displaySize: size)
+                }
+            } else {
+                Color.white.opacity(0.001)
+                    .frame(width: size.width, height: size.height)
+                    .contentShape(Rectangle())
+                    .gesture(SpatialTapGesture().onEnded { v in
+                        model.toggleAutoInstance(atDisplayPoint: CGPoint(x: v.location.x / size.width,
+                                                                         y: v.location.y / size.height))
+                    })
+                    .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+            }
+        case .sky, .background:
+            BrushOverlay(size: size, diameter: model.maskBrushSize, tint: model.maskErase ? .white : .red) { pts in
+                model.addMaskStroke(displayPoints: pts, displaySize: size)
+            }
         }
     }
 

@@ -6,22 +6,33 @@ struct TopBar: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            Picker("", selection: $model.mode) {
+                Label("Library", systemImage: "photo.on.rectangle.angled").tag(EditorModel.Mode.library)
+                Label("Edit", systemImage: "slider.horizontal.3").tag(EditorModel.Mode.edit)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("Switch between your photo library (⌘L) and the editor (⌘E is Export)")
+
             Button {
                 model.presentOpenPanel()
             } label: {
-                Label("Open", systemImage: "folder")
+                Label("Import", systemImage: "square.and.arrow.down")
             }
             .buttonStyle(RPButtonStyle())
-            .help("Open a photo (⌘O)")
+            .help("Add photos to your library and edit them (⌘O)")
 
+            if model.mode == .edit {
             Divider().frame(height: 18).padding(.horizontal, 4)
 
             IconButton(systemName: "arrow.uturn.backward", help: "Undo (⌘Z)", disabled: !model.canUndo) { model.undo() }
             IconButton(systemName: "arrow.uturn.forward", help: "Redo (⇧⌘Z)", disabled: !model.canRedo) { model.redo() }
+            }
 
             Spacer(minLength: 12)
 
-            if model.hasImage {
+            if model.hasImage && model.mode == .edit {
                 VStack(spacing: 1) {
                     Text(model.fileName)
                         .font(.system(size: 13, weight: .semibold))
@@ -36,7 +47,7 @@ struct TopBar: View {
 
             Spacer(minLength: 12)
 
-            if model.hasImage {
+            if model.hasImage && model.mode == .edit {
                 CompareButton()
 
                 HStack(spacing: 0) {
