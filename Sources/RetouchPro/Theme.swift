@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Retouch Pro palette — a calm, neutral grayscale so photos are judged
@@ -13,18 +14,50 @@ extension Color {
         )
     }
 
-    /// #6A6A6A — primary accent: active tools, filled tracks, primary button.
-    static let rpCharcoal = Color(hex: 0x6A6A6A)
-    /// #979797 — secondary text and icons.
-    static let rpSlate = Color(hex: 0x979797)
-    /// #BDBDBD — borders and inactive controls.
-    static let rpSilver = Color(hex: 0xBDBDBD)
-    /// #E2E2E2 — canvas backdrop, hover and selection fills.
-    static let rpMist = Color(hex: 0xE2E2E2)
-    /// #F8F8F8 — panels and bars.
-    static let rpPaper = Color(hex: 0xF8F8F8)
-    /// Darkened charcoal used only for body text so it stays readable.
-    static let rpInk = Color(hex: 0x3D3D3D)
+    /// A color that follows the app's light/dark appearance.
+    static func dynamic(light: UInt32, dark: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            let v = isDark ? dark : light
+            return NSColor(srgbRed: CGFloat((v >> 16) & 0xFF) / 255,
+                           green: CGFloat((v >> 8) & 0xFF) / 255,
+                           blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+        })
+    }
+
+    // Palette: #6A6A6A · #979797 · #BDBDBD · #E2E2E2 · #F8F8F8 (mirrored for dark mode)
+
+    /// Icons and secondary labels.
+    static let rpCharcoal = dynamic(light: 0x6A6A6A, dark: 0xBDBDBD)
+    /// Solid accent fill behind white text (primary button, selected tool).
+    static let rpAccent = dynamic(light: 0x6A6A6A, dark: 0x6A6A6A)
+    /// Secondary text and icons.
+    static let rpSlate = dynamic(light: 0x979797, dark: 0x979797)
+    /// Borders and inactive controls.
+    static let rpSilver = dynamic(light: 0xBDBDBD, dark: 0x4A4A4A)
+    /// Canvas backdrop, hover and selection fills.
+    static let rpMist = dynamic(light: 0xE2E2E2, dark: 0x2C2C2C)
+    /// Panels and bars.
+    static let rpPaper = dynamic(light: 0xF8F8F8, dark: 0x1E1E1E)
+    /// Cards inside panels.
+    static let rpCard = dynamic(light: 0xFFFFFF, dark: 0x262626)
+    /// Slider knobs.
+    static let rpThumb = dynamic(light: 0xFFFFFF, dark: 0xE2E2E2)
+    /// Body text.
+    static let rpInk = dynamic(light: 0x3D3D3D, dark: 0xF8F8F8)
+}
+
+enum AppearanceMode: String, CaseIterable, Identifiable {
+    case system = "System", light = "Light", dark = "Dark"
+    var id: String { rawValue }
+
+    func apply() {
+        switch self {
+        case .system: NSApp.appearance = nil
+        case .light: NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark: NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+    }
 }
 
 struct RPButtonStyle: ButtonStyle {
@@ -50,8 +83,8 @@ struct RPButtonStyle: ButtonStyle {
 
     private func background(pressed: Bool) -> Color {
         switch kind {
-        case .primary: return pressed ? .rpInk : .rpCharcoal
-        case .secondary: return pressed ? .rpMist : .white
+        case .primary: return pressed ? .rpSlate : .rpAccent
+        case .secondary: return pressed ? .rpMist : .rpCard
         case .plain: return pressed ? .rpMist : .clear
         }
     }
@@ -120,7 +153,7 @@ struct SectionCard<Content: View>: View {
             }
         }
         .padding(14)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.white))
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.rpCard))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.rpMist, lineWidth: 1))
     }
 }

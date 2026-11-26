@@ -70,11 +70,13 @@ struct CanvasView: View {
                 switch model.tool {
                 case .crop: CropOverlay(size: size)
                 case .heal: HealOverlay(size: size)
+                case .layers: LayersOverlay(size: size)
                 default: EmptyView()
                 }
             }
         }
         .frame(width: size.width, height: size.height)
+        .coordinateSpace(name: "layerCanvas")
         .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
     }
 
@@ -83,9 +85,26 @@ struct CanvasView: View {
         if model.showOriginal {
             pill("Showing original")
         } else if model.tool == .heal {
-            pill("Click any spot, blemish or dust to remove it")
+            pill("Click a spot, or brush over a distraction, to remove it")
+        } else if model.tool == .layers, let hint = layersHint {
+            pill(hint)
         } else if model.tool == .crop {
             pill("Drag the corners to crop · drag inside to move")
+        }
+    }
+
+    private var layersHint: String? {
+        guard let layer = model.selectedLayer else { return "Add a layer with the + button in the Layers panel" }
+        switch layer.kind {
+        case .path where model.penActive: return "Click to add points · drag points to reshape"
+        case .text, .shape: return "Drag to move · drag the handles to resize"
+        default: break
+        }
+        switch layer.mask.mode {
+        case .brush: return model.maskErase ? "Paint to erase where this layer applies" : "Paint where this layer should apply"
+        case .linear: return "Drag the two handles to set the gradient"
+        case .radial: return "Drag the center to move · drag the edge handles to resize"
+        case .none: return nil
         }
     }
 
@@ -95,7 +114,7 @@ struct CanvasView: View {
             .foregroundColor(.white)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Capsule().fill(Color.rpCharcoal.opacity(0.92)))
+            .background(Capsule().fill(Color.rpAccent.opacity(0.92)))
             .padding(.bottom, 10)
             .allowsHitTesting(false)
     }
@@ -112,28 +131,32 @@ struct NSWindowScaleReader: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
-// MARK: - Heal overlay
+// MARK: - Brush overlay (healing & mask painting)
 
-struct HealOverlay: View {
-    @EnvironmentObject var model: EditorModel
+/// Shows a brush cursor and turns clicks and drags into strokes (points normalized, top-left origin).
+struct BrushOverlay: View {
     let size: CGSize
+    let diameter: CGFloat
+    var tint: Color = .white
+    let onStroke: ([CGPoint]) -> Void
+
     @State private var hover: CGPoint?
+    @State private var stroke: [CGPoint] = []
 
     var body: some View {
         ZStack {
             Color.white.opacity(0.001)
-            ForEach(Array(model.healMarkers(displaySize: size).enumerated()), id: \.offset) { _, marker in
-                Circle()
-                    .stroke(Color.white.opacity(0.55), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                    .frame(width: marker.1 * 2, height: marker.1 * 2)
-                    .position(x: marker.0.x * size.width, y: marker.0.y * size.height)
+            if stroke.count > 1 {
+                Path { p in p.addLines(stroke) }
+                    .stroke(tint.opacity(0.35), style: StrokeStyle(lineWidth: diameter, lineCap: .round, lineJoin: .round))
+                    .allowsHitTesting(false)
             }
             if let hover {
                 ZStack {
                     Circle().stroke(Color.black.opacity(0.45), lineWidth: 3)
                     Circle().stroke(Color.white, lineWidth: 1.5)
                 }
-                .frame(width: model.healBrushSize, height: model.healBrushSize)
+                .frame(width: diameter, height: diameter)
                 .position(hover)
                 .allowsHitTesting(false)
             }
@@ -147,13 +170,58 @@ struct HealOverlay: View {
             }
         }
         .gesture(
-            SpatialTapGesture().onEnded { value in
-                let p = CGPoint(x: value.location.x / size.width, y: value.location.y / size.height)
-                model.heal(atDisplayPoint: p, displaySize: size)
-            }
+            DragGesture(minimumDistance: 0)
+                .onChanged { v in
+                    hover = v.location
+                    if let last = stroke.last, hypot(last.x - v.location.x, last.y - v.location.y) < 2 { return }
+                    stroke.append(v.location)
+                }
+                .onEnded { _ in
+                    let pts = stroke.map { CGPoint(x: $0.x / size.width, y: $0.y / size.height) }
+                    stroke = []
+                    if !pts.isEmpty { onStroke(pts) }
+                }
         )
         .onHover { inside in
             if inside { NSCursor.crosshair.push() } else { NSCursor.pop() }
         }
+    }
+}
+
+struct HealOverlay: View {
+    @EnvironmentObject var model: EditorModel
+    @AppStorage(SettingsKey.showHealMarkers) private var showMarkers = false
+    let size: CGSize
+
+    var body: some View {
+        ZStack {
+            if showMarkers {
+                ForEach(Array(model.healMarkers(displaySize: size).enumerated()), id: \.offset) { _, marker in
+                    let pts = marker.0.map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) }
+                    Group {
+                        if pts.count == 1 {
+                            Circle()
+                                .stroke(Color.white.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                                .frame(width: marker.1 * 2, height: marker.1 * 2)
+                                .position(pts[0])
+                        } else {
+                            Path { p in p.addLines(pts) }
+                                .stroke(Color.white.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        }
+                    }
+                    .allowsHitTesting(false)
+                }
+            }
+            BrushOverlay(size: size, diameter: model.healBrushSize) { pts in
+                model.heal(displayPoints: pts, displaySize: size)
+            }
+            if model.isHealing {
+                ProgressView().controlSize(.small)
+                    .padding(8)
+                    .background(Circle().fill(Color.rpPaper.opacity(0.9)))
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(width: size.width, height: size.height)
     }
 }

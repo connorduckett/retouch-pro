@@ -19,6 +19,13 @@ struct Adjustments: Equatable, Codable {
     var clarity: Double = 0
     var sharpness: Double = 0
     var noiseReduction: Double = 0
+    // Retouch (0…100)
+    /// Lifts harsh, hard-edged shadows (under eyes, hats, trees) and warms them back to match.
+    var shadowRemoval: Double = 0
+    /// Tames bright, blown patches of dappled sunlight.
+    var sunSpotRemoval: Double = 0
+    /// Fades small dark marks on skin: sun spots, age spots, blemishes.
+    var skinSpotRemoval: Double = 0
     // Effects
     var vignette: Double = 0
     var grain: Double = 0
@@ -29,22 +36,159 @@ struct Adjustments: Equatable, Codable {
     mutating func resetLight() { exposure = 0; contrast = 0; highlights = 0; shadows = 0; whites = 0; blacks = 0 }
     mutating func resetColor() { temperature = 0; tint = 0; vibrance = 0; saturation = 0 }
     mutating func resetDetail() { clarity = 0; sharpness = 0; noiseReduction = 0 }
+    mutating func resetRetouch() { shadowRemoval = 0; sunSpotRemoval = 0; skinSpotRemoval = 0 }
     mutating func resetEffects() { vignette = 0; grain = 0; fade = 0 }
 }
 
-/// One spot-heal stroke. Coordinates are in the *original* photo, normalized by its longest side,
-/// with a bottom-left origin (Core Image convention).
+/// One heal click or brush stroke. Coordinates are in the *original* photo, normalized by its
+/// longest side, with a bottom-left origin (Core Image convention).
 struct HealSpot: Equatable, Codable {
-    var x: Double
-    var y: Double
+    /// Stroke centerline as [x, y] pairs (one pair for a click).
+    var points: [[Double]]
     var radius: Double
-    /// Offset from the spot to the clean area the patch is copied from.
+    /// Offset from the healed area to the clean area the texture is copied from.
     var dx: Double
     var dy: Double
-    /// Linear-light color correction so the patch matches its new surroundings.
-    var biasR: Double
-    var biasG: Double
-    var biasB: Double
+    /// Bounding box [x, y, w, h] of the healed region.
+    var box: [Double]
+    /// Smooth color-correction field (linear RGB triples) that blends the patch into its surroundings.
+    var gridWidth: Int
+    var gridHeight: Int
+    var grid: [Float]
+}
+
+// MARK: - Layers
+
+struct RGBAColor: Equatable, Codable {
+    var r: Double, g: Double, b: Double, a: Double = 1
+    static let white = RGBAColor(r: 1, g: 1, b: 1)
+    static let black = RGBAColor(r: 0, g: 0, b: 0)
+    static let charcoal = RGBAColor(r: 0x6A / 255.0, g: 0x6A / 255.0, b: 0x6A / 255.0)
+    var cgColor: CGColor { CGColor(srgbRed: r, green: g, blue: b, alpha: a) }
+}
+
+enum LayerKind: String, Codable {
+    case adjustment, text, shape, path
+    var icon: String {
+        switch self {
+        case .adjustment: return "slider.horizontal.below.square.filled.and.square"
+        case .text: return "textformat"
+        case .shape: return "square.on.circle"
+        case .path: return "scribble.variable"
+        }
+    }
+}
+
+enum ShapeKind: String, Codable, CaseIterable, Identifiable {
+    case rectangle = "Rectangle", ellipse = "Ellipse", line = "Line", triangle = "Triangle", star = "Star"
+    var id: String { rawValue }
+    var icon: String {
+        switch self {
+        case .rectangle: return "rectangle"
+        case .ellipse: return "circle"
+        case .line: return "line.diagonal"
+        case .triangle: return "triangle"
+        case .star: return "star"
+        }
+    }
+}
+
+enum LayerBlendMode: String, Codable, CaseIterable, Identifiable {
+    case normal = "Normal", multiply = "Multiply", screen = "Screen", overlay = "Overlay", softLight = "Soft Light"
+    var id: String { rawValue }
+    var filterName: String? {
+        switch self {
+        case .normal: return nil
+        case .multiply: return "CIMultiplyBlendMode"
+        case .screen: return "CIScreenBlendMode"
+        case .overlay: return "CIOverlayBlendMode"
+        case .softLight: return "CISoftLightBlendMode"
+        }
+    }
+}
+
+enum TextAlign: String, Codable, CaseIterable, Identifiable {
+    case left, center, right
+    var id: String { rawValue }
+    var icon: String { "text.align\(rawValue)" }
+}
+
+enum MaskMode: String, Codable, CaseIterable, Identifiable {
+    case none = "Whole Photo", brush = "Brush", linear = "Gradient", radial = "Radial"
+    var id: String { rawValue }
+}
+
+/// A brush stroke on a layer mask, in source-photo coordinates (normalized by the longest side, y-up).
+struct MaskStroke: Equatable, Codable {
+    var points: [[Double]]
+    var radius: Double
+    var erase: Bool
+}
+
+struct LayerMask: Equatable, Codable {
+    var mode: MaskMode = .none
+    var strokes: [MaskStroke] = []
+    /// Edge softness 0…100.
+    var feather: Double = 40
+    var inverted = false
+    /// Linear gradient: fully applied at `start`, fades out by `end`. Source-normalized, y-up.
+    var start: [Double] = [0.5, 0.2]
+    var end: [Double] = [0.5, 0.45]
+    /// Radial: ellipse center and radii (source-normalized).
+    var center: [Double] = [0.5, 0.33]
+    var radiusX: Double = 0.18
+    var radiusY: Double = 0.18
+}
+
+/// A layer stacked on top of the photo. Text, shape and path geometry is stored relative to the
+/// photo's frame (0…1, top-left origin), so it re-flows and scales when you crop or export at any size.
+struct Layer: Identifiable, Equatable, Codable {
+    var id = UUID()
+    var name: String
+    var kind: LayerKind
+    var visible = true
+    var opacity: Double = 100
+    var blend: LayerBlendMode = .normal
+    var mask = LayerMask()
+
+    // Adjustment layer
+    var adjustments = Adjustments()
+
+    // Text & shape box (normalized to the frame, top-left origin)
+    var frame = CGRect(x: 0.2, y: 0.4, width: 0.6, height: 0.2)
+
+    // Text
+    var text = "Your text here"
+    var fontFamily = "Didot"
+    var fontWeight: Double = 5          // NSFontManager weight 1…12 (5 = regular)
+    var italic = false
+    /// Font size as a % of the frame's shorter side.
+    var fontSize: Double = 7
+    /// Shrink text so it always fits inside its box.
+    var autoFit = true
+    var textColor = RGBAColor.white
+    var alignment: TextAlign = .center
+    var letterSpacing: Double = 0       // % of font size
+    var lineSpacing: Double = 0         // % of font size
+    var uppercase = false
+    var textShadow = true
+
+    // Shape & path
+    var shapeKind: ShapeKind = .rectangle
+    var fillEnabled = true
+    var fillColor = RGBAColor(r: 1, g: 1, b: 1, a: 0.85)
+    var strokeEnabled = false
+    var strokeColor = RGBAColor.charcoal
+    /// Stroke width as a % of the frame's shorter side.
+    var strokeWidth: Double = 0.6
+    /// Corner radius as a % of the frame's shorter side.
+    var cornerRadius: Double = 0
+    /// Pen-tool points (frame-normalized, top-left origin).
+    var pathPoints: [[Double]] = []
+    var pathClosed = false
+    var pathSmooth = true
+
+    var isContent: Bool { kind != .adjustment }
 }
 
 struct EditState: Equatable, Codable {
@@ -62,6 +206,8 @@ struct EditState: Equatable, Codable {
     var crop = CGRect(x: 0, y: 0, width: 1, height: 1)
 
     var heals: [HealSpot] = []
+    /// Bottom to top.
+    var layers: [Layer] = []
 
     var isIdentity: Bool { self == EditState() }
     static let fullCrop = CGRect(x: 0, y: 0, width: 1, height: 1)
@@ -141,7 +287,7 @@ enum AspectRatio: String, CaseIterable, Identifiable {
 }
 
 enum Tool: String, CaseIterable, Identifiable {
-    case adjust, looks, crop, heal
+    case adjust, looks, crop, heal, layers
     var id: String { rawValue }
 
     var title: String {
@@ -150,6 +296,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .looks: return "Looks"
         case .crop: return "Crop"
         case .heal: return "Heal"
+        case .layers: return "Layers"
         }
     }
 
@@ -159,6 +306,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .looks: return "camera.filters"
         case .crop: return "crop.rotate"
         case .heal: return "bandage"
+        case .layers: return "square.3.layers.3d"
         }
     }
 
@@ -168,6 +316,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .looks: return "2"
         case .crop: return "3"
         case .heal: return "4"
+        case .layers: return "5"
         }
     }
 }

@@ -19,7 +19,7 @@ final class EditorModel: ObservableObject {
     }
     @Published var tool: Tool = .adjust {
         didSet {
-            if tool != oldValue && (tool == .crop || oldValue == .crop) { scheduleRender() }
+            if tool != oldValue && (tool == .crop || oldValue == .crop || showMaskOverlay) { scheduleRender() }
         }
     }
     @Published var cropAspect: AspectRatio = .free
@@ -130,6 +130,7 @@ final class EditorModel: ObservableObject {
                 self.lookThumbnails = [:]
                 self.preview = nil
                 self.state = EditState()
+                self.selectedLayerID = nil
                 self.isLoading = false
                 self.scheduleRender()
                 self.buildLookThumbnails()
@@ -140,6 +141,8 @@ final class EditorModel: ObservableObject {
 
     private func confirmDiscardIfNeeded() -> Bool {
         guard hasImage, hasUnexportedChanges else { return true }
+        if UserDefaults.standard.object(forKey: SettingsKey.confirmDiscard) != nil,
+           !UserDefaults.standard.bool(forKey: SettingsKey.confirmDiscard) { return true }
         let alert = NSAlert()
         alert.messageText = "Discard your edits?"
         alert.informativeText = "You haven’t exported “\(fileName)” since your last change."
@@ -210,43 +213,92 @@ final class EditorModel: ObservableObject {
 
     // MARK: Auto enhance
 
-    func autoEnhance() {
-        guard let original = originalPreview?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
-        let bins = ImagePipeline.histogram(of: original, normalized: false)
-        let total = bins.reduce(0, +)
-        guard total > 0 else { return }
-        func percentile(_ p: Double) -> Double {
-            var acc = 0.0
-            for (i, v) in bins.enumerated() {
-                acc += v
-                if acc / total >= p { return Double(i) / 255 }
-            }
-            return 1
-        }
-        let low = percentile(0.01), mid = percentile(0.5), high = percentile(0.99)
+    /// Simple statistics of the original photo, measured the same way the Signature target was.
+    private struct PhotoStats { var p1, p50, p99, saturation, warmth: Double }
 
-        var a = Adjustments()
-        if mid > 0.02 {
-            let ev = log2(pow(0.46 / mid, 2.2))
-            a.exposure = max(-60, min(60, ev / 2 * 100 * 0.6))
+    private func originalStats() -> PhotoStats? {
+        guard let cg = originalPreview?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let w = 200, h = max(1, Int(200.0 * Double(cg.height) / Double(cg.width)))
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: ImagePipeline.sRGB, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = ctx.data else { return nil }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let px = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
+        var lum: [Double] = []; lum.reserveCapacity(w * h)
+        var sat = 0.0, warm = 0.0, warmN = 0.0
+        for i in 0..<(w * h) {
+            let r = Double(px[i * 4]), g = Double(px[i * 4 + 1]), b = Double(px[i * 4 + 2])
+            let l = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            lum.append(l)
+            let mx = max(r, g, b), mn = min(r, g, b)
+            sat += mx > 0 ? (mx - mn) / mx : 0
+            if l > 40 && l < 220 { warm += r - b; warmN += 1 }
         }
-        if high < 0.96 { a.whites = min(50, (0.97 - high) * 250) }
-        if low > 0.04 { a.blacks = max(-50, -(low - 0.02) * 300) }
-        if high > 0.985 { a.highlights = -25 }
-        if low < 0.02 { a.shadows = 15 }
-        a.contrast = 8
-        a.vibrance = 22
-        a.clarity = 8
+        lum.sort()
+        func q(_ p: Double) -> Double { lum[Int(p * Double(lum.count - 1))] / 255 }
+        return PhotoStats(p1: q(0.01), p50: q(0.5), p99: q(0.99),
+                          saturation: sat / Double(w * h), warmth: warmN > 0 ? warm / warmN : 0)
+    }
+
+    func autoEnhance() {
+        guard let st = originalStats() else { return }
+        let style = AutoEnhanceStyle(rawValue: UserDefaults.standard.string(forKey: SettingsKey.autoStyle) ?? "") ?? .signature
+        var a = Adjustments()
+
+        switch style {
+        case .natural:
+            if st.p50 > 0.02 {
+                let ev = log2(pow(0.46 / st.p50, 2.2))
+                a.exposure = max(-60, min(60, ev / 2 * 100 * 0.6))
+            }
+            if st.p99 < 0.96 { a.whites = min(50, (0.97 - st.p99) * 250) }
+            if st.p1 > 0.04 { a.blacks = max(-50, -(st.p1 - 0.02) * 300) }
+            if st.p99 > 0.985 { a.highlights = -25 }
+            if st.p1 < 0.02 { a.shadows = 15 }
+            a.contrast = 8
+            a.vibrance = 22
+            a.clarity = 8
+
+        case .signature:
+            // Target profile measured from a professional wedding & portrait portfolio:
+            // bright midtones (median ≈ 0.55), softly lifted blacks (1st percentile ≈ 0.077),
+            // clean but unclipped whites (99th ≈ 0.96), gentle saturation (≈ 0.29) and a warm balance.
+            let target = PhotoStats(p1: 0.077, p50: 0.55, p99: 0.958, saturation: 0.29, warmth: 19)
+            if st.p50 > 0.02 {
+                let ev = log2(pow(target.p50 / st.p50, 2.2)) * 0.75
+                a.exposure = max(-60, min(70, ev / 2 * 100))
+            }
+            a.shadows = 22
+            a.contrast = -6
+            if st.p99 > 0.985 { a.highlights = -35 } else { a.highlights = -12 }
+            if st.p99 < 0.94 { a.whites = min(45, (target.p99 - st.p99) * 260) }
+            // Soft, matte blacks instead of crushed ones.
+            a.fade = max(8, min(32, (target.p1 - st.p1) * 380 + 10))
+            if st.p1 > 0.12 { a.blacks = max(-35, -(st.p1 - target.p1) * 200) }
+            // Gentle color: pull saturation toward the target, with vibrance protecting skin.
+            let satDelta = target.saturation - st.saturation
+            a.saturation = max(-25, min(15, satDelta * 120))
+            a.vibrance = 12
+            // Warm balance. One Temperature step shifts (R−B) by ≈ 0.35 levels.
+            if st.saturation > 0.04 {
+                a.temperature = max(-25, min(30, (target.warmth - st.warmth) / 0.35 * 0.6))
+            }
+            a.tint = 3
+            a.clarity = -4
+        }
 
         apply {
             let keep = $0.adjustments
             $0.adjustments = a
-            // Keep the user's detail & effects choices.
+            // Keep the user's detail, retouch & effects choices.
             $0.adjustments.sharpness = keep.sharpness
             $0.adjustments.noiseReduction = keep.noiseReduction
+            $0.adjustments.shadowRemoval = keep.shadowRemoval
+            $0.adjustments.sunSpotRemoval = keep.sunSpotRemoval
+            $0.adjustments.skinSpotRemoval = keep.skinSpotRemoval
             $0.adjustments.vignette = keep.vignette
             $0.adjustments.grain = keep.grain
-            $0.adjustments.fade = keep.fade
+            if style == .natural { $0.adjustments.fade = keep.fade }
         }
     }
 
@@ -302,42 +354,211 @@ final class EditorModel: ObservableObject {
         applyAspect()
     }
 
-    // MARK: Heal
+    // MARK: Coordinate mapping
 
-    /// `point` is normalized (0…1) in the displayed, cropped photo with a top-left origin.
-    func heal(atDisplayPoint point: CGPoint, displaySize: CGSize) {
-        guard let engine = healEngine, fullSize != .zero, displaySize.width > 0 else { return }
+    /// Displayed photo (normalized, top-left origin) → original photo (normalized by longest side, y-up).
+    func displayToSource(_ p: CGPoint) -> CGPoint {
+        guard fullSize != .zero else { return .zero }
         let g = ImagePipeline.geometry(sourceSize: fullSize, state: state)
-        let outPt = CGPoint(x: g.crop.minX + point.x * g.crop.width,
-                            y: g.crop.minY + (1 - point.y) * g.crop.height)
-        let inv = g.transform.inverted()
-        let src = outPt.applying(inv)
+        let out = CGPoint(x: g.crop.minX + p.x * g.crop.width, y: g.crop.minY + (1 - p.y) * g.crop.height)
+        let src = out.applying(g.transform.inverted())
         let maxDim = max(fullSize.width, fullSize.height)
-
-        // Brush radius: screen points → output pixels → source pixels.
-        let outRadius = (healBrushSize / 2) / displaySize.width * g.crop.width
-        let v = CGPoint(x: outRadius, y: 0).applying(CGAffineTransform(a: inv.a, b: inv.b, c: inv.c, d: inv.d, tx: 0, ty: 0))
-        let srcRadius = hypot(v.x, v.y)
-
-        guard src.x >= 0, src.y >= 0, src.x <= fullSize.width, src.y <= fullSize.height else { return }
-        let spot = engine.heal(x: src.x / maxDim, y: src.y / maxDim, radius: srcRadius / maxDim)
-        apply { $0.heals.append(spot) }
+        return CGPoint(x: src.x / maxDim, y: src.y / maxDim)
     }
 
-    /// Positions of heal spots in normalized display coordinates (top-left origin) for drawing markers.
-    func healMarkers(displaySize: CGSize) -> [(CGPoint, CGFloat)] {
-        guard fullSize != .zero else { return [] }
+    /// Original photo (normalized, y-up) → displayed photo (normalized, top-left origin).
+    func sourceToDisplay(_ p: CGPoint) -> CGPoint {
+        guard fullSize != .zero else { return .zero }
         let g = ImagePipeline.geometry(sourceSize: fullSize, state: state)
         let maxDim = max(fullSize.width, fullSize.height)
-        return state.heals.compactMap { spot in
-            let p = CGPoint(x: spot.x * maxDim, y: spot.y * maxDim).applying(g.transform)
-            let nx = (p.x - g.crop.minX) / g.crop.width
-            let ny = 1 - (p.y - g.crop.minY) / g.crop.height
-            guard (0...1).contains(nx), (0...1).contains(ny) else { return nil }
-            let rv = CGPoint(x: spot.radius * maxDim, y: 0)
-                .applying(CGAffineTransform(a: g.transform.a, b: g.transform.b, c: g.transform.c, d: g.transform.d, tx: 0, ty: 0))
-            let r = hypot(rv.x, rv.y) / g.crop.width * displaySize.width
-            return (CGPoint(x: nx, y: ny), r)
+        let out = CGPoint(x: p.x * maxDim, y: p.y * maxDim).applying(g.transform)
+        return CGPoint(x: (out.x - g.crop.minX) / g.crop.width, y: 1 - (out.y - g.crop.minY) / g.crop.height)
+    }
+
+    /// Screen length (points, at the given display width) → original-photo length (normalized).
+    func displayLengthToSource(_ length: CGFloat, displayWidth: CGFloat) -> Double {
+        guard fullSize != .zero, displayWidth > 0 else { return 0 }
+        let g = ImagePipeline.geometry(sourceSize: fullSize, state: state)
+        let out = length / displayWidth * g.crop.width
+        let t = g.transform.inverted()
+        let v = CGPoint(x: out, y: 0).applying(CGAffineTransform(a: t.a, b: t.b, c: t.c, d: t.d, tx: 0, ty: 0))
+        return hypot(v.x, v.y) / max(fullSize.width, fullSize.height)
+    }
+
+    /// Original-photo length (normalized) → screen length at the given display width.
+    func sourceLengthToDisplay(_ length: Double, displayWidth: CGFloat) -> CGFloat {
+        guard fullSize != .zero else { return 0 }
+        let g = ImagePipeline.geometry(sourceSize: fullSize, state: state)
+        let maxDim = max(fullSize.width, fullSize.height)
+        let t = g.transform
+        let v = CGPoint(x: length * maxDim, y: 0).applying(CGAffineTransform(a: t.a, b: t.b, c: t.c, d: t.d, tx: 0, ty: 0))
+        return hypot(v.x, v.y) / g.crop.width * displayWidth
+    }
+
+    // MARK: Heal
+
+    @Published private(set) var isHealing = false
+
+    /// Heals a click (one point) or a brush stroke. Points are normalized in the displayed photo (top-left origin).
+    func heal(displayPoints: [CGPoint], displaySize: CGSize) {
+        guard let engine = healEngine, fullSize != .zero, displaySize.width > 0, !displayPoints.isEmpty else { return }
+        let src = displayPoints.map(displayToSource)
+        let aspect = fullSize.width / max(fullSize.width, fullSize.height)
+        let aspectH = fullSize.height / max(fullSize.width, fullSize.height)
+        let inside = src.filter { $0.x >= 0 && $0.y >= 0 && $0.x <= aspect && $0.y <= aspectH }
+        guard !inside.isEmpty else { return }
+        let radius = displayLengthToSource(healBrushSize / 2, displayWidth: displaySize.width)
+        isHealing = true
+        workQueue.async { [weak self] in
+            let spot = engine.heal(points: inside, radius: radius)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isHealing = false
+                if let spot { self.apply { $0.heals.append(spot) } }
+            }
+        }
+    }
+
+    /// Outlines of healed areas in display coordinates (normalized, top-left origin) with on-screen radius.
+    func healMarkers(displaySize: CGSize) -> [([CGPoint], CGFloat)] {
+        guard fullSize != .zero else { return [] }
+        return state.heals.map { spot in
+            let pts = spot.points.compactMap { $0.count == 2 ? sourceToDisplay(CGPoint(x: $0[0], y: $0[1])) : nil }
+            return (pts, sourceLengthToDisplay(spot.radius, displayWidth: displaySize.width))
+        }
+    }
+
+    // MARK: Layers
+
+    @Published var selectedLayerID: UUID? {
+        didSet { if selectedLayerID != oldValue { editingMask = false; if showMaskOverlay { scheduleRender() } } }
+    }
+    /// For text/shape/path layers: whether canvas clicks edit the mask instead of the content.
+    @Published var editingMask = false
+    @Published var showMaskOverlay = false {
+        didSet { if showMaskOverlay != oldValue { scheduleRender() } }
+    }
+    @Published var maskBrushSize: Double = 60
+    @Published var maskErase = false
+    /// When true, clicks on the canvas add pen-tool points to the selected path layer.
+    @Published var penActive = true
+
+    var selectedLayerIndex: Int? {
+        guard let id = selectedLayerID else { return nil }
+        return state.layers.firstIndex { $0.id == id }
+    }
+
+    var selectedLayer: Layer? {
+        selectedLayerIndex.map { state.layers[$0] }
+    }
+
+    /// Live edit of the selected layer (call `commit()` when the gesture ends).
+    func updateSelectedLayer(_ change: (inout Layer) -> Void) {
+        guard let i = selectedLayerIndex else { return }
+        var s = state
+        change(&s.layers[i])
+        state = s
+    }
+
+    enum NewLayer {
+        case adjustment, removeShadows, removeSunSpots, smoothSkinSpots, brightenFaces
+        case text, shape(ShapeKind), path
+    }
+
+    func addLayer(_ kind: NewLayer) {
+        var layer: Layer
+        switch kind {
+        case .adjustment:
+            layer = Layer(name: "Adjustment", kind: .adjustment)
+        case .removeShadows:
+            layer = Layer(name: "Remove Shadows", kind: .adjustment)
+            layer.adjustments.shadowRemoval = 70
+            layer.adjustments.exposure = 10
+            layer.adjustments.temperature = 6
+            layer.mask.mode = .brush
+        case .removeSunSpots:
+            layer = Layer(name: "Tame Sun Spots", kind: .adjustment)
+            layer.adjustments.sunSpotRemoval = 75
+            layer.adjustments.exposure = -12
+            layer.adjustments.saturation = 5
+            layer.mask.mode = .brush
+        case .smoothSkinSpots:
+            layer = Layer(name: "Fade Skin Spots", kind: .adjustment)
+            layer.adjustments.skinSpotRemoval = 75
+            layer.mask.mode = .brush
+        case .brightenFaces:
+            layer = Layer(name: "Brighten", kind: .adjustment)
+            layer.adjustments.exposure = 18
+            layer.adjustments.shadows = 15
+            layer.mask.mode = .radial
+            layer.mask.feather = 60
+            let c = displayToSource(CGPoint(x: 0.5, y: 0.4))
+            layer.mask.center = [c.x, c.y]
+        case .text:
+            layer = Layer(name: "Text", kind: .text)
+            layer.frame = CGRect(x: 0.15, y: 0.42, width: 0.7, height: 0.16)
+        case .shape(let shape):
+            layer = Layer(name: shape.rawValue, kind: .shape)
+            layer.shapeKind = shape
+            layer.frame = shape == .line ? CGRect(x: 0.25, y: 0.48, width: 0.5, height: 0.04)
+                                         : CGRect(x: 0.35, y: 0.35, width: 0.3, height: 0.3)
+            if shape == .line { layer.strokeEnabled = true; layer.strokeColor = .white; layer.strokeWidth = 0.5 }
+        case .path:
+            layer = Layer(name: "Path", kind: .path)
+            layer.fillEnabled = true
+            layer.strokeEnabled = true
+            layer.strokeColor = .white
+            layer.fillColor = RGBAColor(r: 1, g: 1, b: 1, a: 0.25)
+            penActive = true
+        }
+        // Avoid duplicate names.
+        let base = layer.name
+        var n = 2
+        while state.layers.contains(where: { $0.name == layer.name }) { layer.name = "\(base) \(n)"; n += 1 }
+
+        // Insert above the selected layer (or on top).
+        let insertAt = selectedLayerIndex.map { $0 + 1 } ?? state.layers.count
+        apply { $0.layers.insert(layer, at: insertAt) }
+        selectedLayerID = layer.id
+        if tool != .layers { tool = .layers }
+    }
+
+    func deleteSelectedLayer() {
+        guard let i = selectedLayerIndex else { return }
+        apply { $0.layers.remove(at: i) }
+        if state.layers.isEmpty { selectedLayerID = nil }
+        else { selectedLayerID = state.layers[max(0, i - 1)].id }
+    }
+
+    func duplicateSelectedLayer() {
+        guard let i = selectedLayerIndex else { return }
+        var copy = state.layers[i]
+        copy.id = UUID()
+        copy.name += " copy"
+        apply { $0.layers.insert(copy, at: i + 1) }
+        selectedLayerID = copy.id
+    }
+
+    func moveSelectedLayer(up: Bool) {
+        guard let i = selectedLayerIndex else { return }
+        let j = up ? i + 1 : i - 1
+        guard j >= 0, j < state.layers.count else { return }
+        apply { $0.layers.swapAt(i, j) }
+    }
+
+    func toggleVisibility(_ id: UUID) {
+        guard let i = state.layers.firstIndex(where: { $0.id == id }) else { return }
+        apply { $0.layers[i].visible.toggle() }
+    }
+
+    /// Adds a painted mask stroke to the selected layer. Points are display-normalized (top-left origin).
+    func addMaskStroke(displayPoints: [CGPoint], displaySize: CGSize) {
+        guard let i = selectedLayerIndex, !displayPoints.isEmpty else { return }
+        let pts = displayPoints.map(displayToSource).map { [Double($0.x), Double($0.y)] }
+        let r = displayLengthToSource(maskBrushSize / 2, displayWidth: displaySize.width)
+        apply {
+            $0.layers[i].mask.mode = .brush
+            $0.layers[i].mask.strokes.append(MaskStroke(points: pts, radius: r, erase: maskErase))
         }
     }
 
@@ -358,6 +579,7 @@ final class EditorModel: ObservableObject {
         let state = self.state
         let ignoreCrop = tool == .crop
         let token = loadToken
+        let overlayLayer = (tool == .layers && showMaskOverlay) ? selectedLayerID : nil
 
         // Pick a source resolution: the proxy is plenty for "fit"; zooming in uses the full photo.
         var source = proxy
@@ -372,7 +594,8 @@ final class EditorModel: ObservableObject {
         }
 
         renderQueue.async { [weak self] in
-            let output = ImagePipeline.render(source: source, state: state, ignoreCrop: ignoreCrop)
+            let output = ImagePipeline.render(source: source, state: state, ignoreCrop: ignoreCrop,
+                                              maskOverlayLayer: overlayLayer)
             let cg = ImagePipeline.cgImage(output)
             let hist = cg.map { ImagePipeline.histogram(of: $0) } ?? []
             DispatchQueue.main.async {
@@ -461,6 +684,23 @@ final class EditorModel: ObservableObject {
     }
 
     @Published var exportOptions = ExportOptions()
+
+    /// Starts the Export window from the user's saved defaults (Settings ▸ Export).
+    func loadExportDefaults() {
+        let d = UserDefaults.standard
+        if let f = d.string(forKey: SettingsKey.exportFormat).flatMap(ExportOptions.Format.init(rawValue:)) {
+            exportOptions.format = f
+        }
+        if d.object(forKey: SettingsKey.exportQuality) != nil {
+            exportOptions.quality = d.double(forKey: SettingsKey.exportQuality)
+        }
+        if let c = d.string(forKey: SettingsKey.exportColor).flatMap(ExportOptions.ColorProfile.init(rawValue:)) {
+            exportOptions.colorProfile = c
+        }
+        if d.object(forKey: SettingsKey.keepMetadata) != nil {
+            exportOptions.keepMetadata = d.bool(forKey: SettingsKey.keepMetadata)
+        }
+    }
     @Published var isExporting = false
     @Published var lastExportURL: URL?
 

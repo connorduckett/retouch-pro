@@ -30,6 +30,7 @@ struct ExportSheet: View {
         .padding(24)
         .frame(width: 460)
         .background(Color.rpPaper)
+        .onAppear { model.loadExportDefaults() }
     }
 
     private var form: some View {
@@ -44,7 +45,7 @@ struct ExportSheet: View {
 
             if model.exportOptions.format.isLossy {
                 row("Quality") {
-                    RPSlider(title: qualityLabel, value: $model.exportOptions.quality, range: 40...100,
+                    RPSlider(title: qualityLabel, value: $model.exportOptions.quality, range: 40...100, defaultValue: 90,
                              format: { "\(Int($0.rounded()))" }, onCommit: {})
                 }
             }
@@ -85,15 +86,15 @@ struct ExportSheet: View {
                         ForEach(EditorModel.ExportOptions.WatermarkPosition.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .font(.system(size: 12))
-                    RPSlider(title: "Size", value: $model.exportOptions.watermarkSize, range: 1...10,
+                    RPSlider(title: "Size", value: $model.exportOptions.watermarkSize, range: 1...10, defaultValue: 3,
                              format: { String(format: "%.1f%%", $0) }, onCommit: {})
-                    RPSlider(title: "Opacity", value: $model.exportOptions.watermarkOpacity, range: 10...100,
+                    RPSlider(title: "Opacity", value: $model.exportOptions.watermarkOpacity, range: 10...100, defaultValue: 70,
                              format: { "\(Int($0.rounded()))%" }, onCommit: {})
                 }
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white))
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.rpCard))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.rpMist))
 
             if let error {

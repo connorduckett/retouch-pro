@@ -38,7 +38,7 @@ private struct ToolRailButton: View {
             .frame(width: 62, height: 58)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(selected && enabled ? Color.rpCharcoal : (hover && enabled ? Color.rpMist : .clear))
+                    .fill(selected && enabled ? Color.rpAccent : (hover && enabled ? Color.rpMist : .clear))
             )
             .contentShape(Rectangle())
         }

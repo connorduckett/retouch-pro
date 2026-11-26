@@ -21,10 +21,11 @@ Works on macOS 13 Ventura or newer, on both Apple Silicon and Intel Macs.
 
 | Tool | What you can do |
 |---|---|
-| **Adjust** | Exposure, Contrast, Highlights, Shadows, Whites, Blacks · Temperature, Tint, Vibrance, Saturation · Clarity, Sharpen, Noise Reduction · Vignette, Grain, Fade · live histogram · **Auto Enhance** |
+| **Adjust** | Exposure, Contrast, Highlights, Shadows, Whites, Blacks · Temperature, Tint, Vibrance, Saturation · Remove Shadows, Tame Sun Spots, Fade Skin Spots · Clarity, Sharpen, Noise Reduction · Vignette, Grain, Fade · live histogram · **Auto Enhance** (Signature or Natural style) |
 | **Looks** | 16 one-click presets (Golden Hour, Soft Portrait, Light & Airy, Moody, Film, Mono, Noir…) with a strength slider, layered on top of your own adjustments |
 | **Crop** | Drag-to-crop with rule-of-thirds grid · 1:1, 4:5, 2:3, 5:7, 8:10, 16:9 and more · Straighten · Rotate · Flip |
-| **Heal** | Click a blemish, dust spot or distraction and it's gone. Retouch Pro finds matching texture nearby and color-matches it |
+| **Heal** | Click a blemish or dust spot, or brush over a larger distraction. Retouch Pro copies clean texture from nearby and blends its light and color in seamlessly |
+| **Layers** | Adjustment layers with masks (brush, gradient or radial) · Remove Shadows, Tame Sun Spots and Fade Skin Spots layers you paint where needed · Text that re-flows and scales with your crop · Shapes (rectangle, ellipse, line, triangle, star) · Pen-tool paths with smooth curves · Opacity and blend modes |
 | **Export** | JPEG, HEIC, PNG or 16-bit TIFF · full size or web/social sizes · sRGB or Display P3 · keeps EXIF/copyright · optional watermark |
 
 Other things:
@@ -33,6 +34,8 @@ Other things:
 - **Non-destructive.** Your original file is never changed. Export saves a new copy.
 - **Before / After.** Press and hold the button, or press ⌘\ to toggle.
 - **Unlimited undo.** ⌘Z / ⇧⌘Z.
+- **Light or dark mode**, and default export settings, in **Settings** (⌘,).
+- **Signature Auto Enhance**: a bright, airy, warm look with soft blacks, tuned from a professional wedding & portrait portfolio. Switch to a neutral "Natural" style in Settings.
 - **Copy & paste edits** between photos (⇧⌘C, then open the next photo and press ⇧⌘V).
 - Drag a photo onto the window, or right-click a photo in Finder → **Open With → Retouch Pro**.
 
@@ -41,15 +44,17 @@ Other things:
 | | |
 |---|---|
 | Open / Export | ⌘O / ⌘E |
-| Adjust / Looks / Crop / Heal | ⌘1 / ⌘2 / ⌘3 / ⌘4 |
+| Adjust / Looks / Crop / Heal / Layers | ⌘1 / ⌘2 / ⌘3 / ⌘4 / ⌘5 |
+| Settings | ⌘, |
 | Zoom in / out / fit | ⌘+ / ⌘− / ⌘0 (or pinch on the trackpad) |
 | Rotate left / right | ⌘[ / ⌘] |
 | Auto Enhance | ⇧⌘A |
 | Reset everything | ⇧⌘R |
-| Reset one slider | double-click its name |
+| Reset one slider | double-click it, or Option-click it |
 
 ![Crop](docs/screenshot-crop.png)
 ![Heal](docs/screenshot-heal.png)
+![Layers (dark mode)](docs/screenshot-layers.png)
 
 ## Building from source
 
@@ -64,7 +69,8 @@ This makes `dist/Retouch Pro.app` (Apple Silicon + Intel) and `dist/RetouchPro.z
 The app is written in SwiftUI with a Core Image processing pipeline:
 
 - `Sources/RetouchPro/ImagePipeline.swift`: loading (including RAW), geometry, adjustments, looks, effects, export helpers
-- `Sources/RetouchPro/HealEngine.swift`: finds clean source texture for spot healing
+- `Sources/RetouchPro/HealEngine.swift`: finds clean source texture and builds the seamless color-blend field for healing
+- `Sources/RetouchPro/LayerRenderer.swift`: adjustment layers, masks, text, shapes and pen paths
 - `Sources/RetouchPro/EditorModel.swift`: editing state, undo history, live preview rendering, export
 - `Sources/RetouchPro/Views/`: the interface
 - `Sources/RetouchPro/Theme.swift`: the grayscale palette (#6A6A6A, #979797, #BDBDBD, #E2E2E2, #F8F8F8)

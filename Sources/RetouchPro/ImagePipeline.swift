@@ -105,7 +105,8 @@ enum ImagePipeline {
 
     /// Builds the edited image. `source` may be a proxy or the full-resolution photo;
     /// every parameter is resolution-independent.
-    static func render(source: CIImage, state: EditState, ignoreCrop: Bool = false) -> CIImage {
+    static func render(source: CIImage, state: EditState, ignoreCrop: Bool = false,
+                       maskOverlayLayer: UUID? = nil) -> CIImage {
         let sourceMax = max(source.extent.width, source.extent.height)
         var img = applyHeals(source, heals: state.heals, scale: sourceMax)
 
@@ -138,6 +139,16 @@ enum ImagePipeline {
         }
 
         img = applyEffects(img, state.adjustments, extent: extent)
+
+        // Layers, bottom to top.
+        let ctx = LayerRenderer.Context(sourceSize: source.extent.size, geometry: g, extent: extent)
+        for layer in state.layers where layer.visible && layer.opacity > 0 {
+            img = LayerRenderer.apply(layer, to: img, ctx)
+        }
+        if let id = maskOverlayLayer, let layer = state.layers.first(where: { $0.id == id }),
+           let mask = LayerRenderer.mask(for: layer, ctx) {
+            img = LayerRenderer.maskOverlay(mask, over: img, extent: extent)
+        }
         return img.cropped(to: extent)
     }
 
@@ -147,28 +158,86 @@ enum ImagePipeline {
         guard !heals.isEmpty else { return image }
         let extent = image.extent
         var img = image
-        for spot in heals {
-            let c = CGPoint(x: spot.x * scale, y: spot.y * scale)
-            let r = spot.radius * scale
+        for spot in heals where spot.box.count == 4 && spot.gridWidth > 0 && spot.gridHeight > 0 {
             let d = CGPoint(x: spot.dx * scale, y: spot.dy * scale)
+            let r = spot.radius * scale
+            let box = CGRect(x: spot.box[0] * scale, y: spot.box[1] * scale,
+                             width: spot.box[2] * scale, height: spot.box[3] * scale)
+            let region = box.intersection(extent)
+            guard !region.isEmpty else { continue }
+
+            // 1) Texture from the clean source area.
             var patch = img.clampedToExtent()
                 .transformed(by: CGAffineTransform(translationX: -d.x, y: -d.y))
-            patch = patch.applyingFilter("CIColorMatrix", parameters: [
-                "inputBiasVector": CIVector(x: spot.biasR, y: spot.biasG, z: spot.biasB, w: 0),
-            ])
-            let mask = CIFilter(name: "CIRadialGradient", parameters: [
-                "inputCenter": CIVector(x: c.x, y: c.y),
-                "inputRadius0": r * 0.55,
-                "inputRadius1": r,
-                "inputColor0": CIColor.white,
-                "inputColor1": CIColor.black,
-            ])!.outputImage!.cropped(to: extent)
-            img = patch.applyingFilter("CIBlendWithMask", parameters: [
+
+            // 2) Smooth color-correction field so the patch matches its new surroundings.
+            if let field = correctionField(spot, box: box) {
+                patch = field.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: patch])
+            }
+
+            // 3) Soft-edged mask following the click or stroke.
+            let mask = strokeMask(points: spot.points, radius: r, scale: scale, box: box)
+            let healed = patch.applyingFilter("CIBlendWithMask", parameters: [
                 kCIInputBackgroundImageKey: img,
                 kCIInputMaskImageKey: mask,
-            ]).cropped(to: extent)
+            ]).cropped(to: region)
+            img = healed.composited(over: img).cropped(to: extent)
         }
         return img
+    }
+
+    private static func correctionField(_ spot: HealSpot, box: CGRect) -> CIImage? {
+        let gw = spot.gridWidth, gh = spot.gridHeight
+        guard spot.grid.count == gw * gh * 3 else { return nil }
+        var rgba = [Float](repeating: 0, count: gw * gh * 4)
+        for i in 0..<(gw * gh) {
+            rgba[i * 4] = spot.grid[i * 3]
+            rgba[i * 4 + 1] = spot.grid[i * 3 + 1]
+            rgba[i * 4 + 2] = spot.grid[i * 3 + 2]
+            rgba[i * 4 + 3] = 0   // leave alpha untouched when added
+        }
+        let data = rgba.withUnsafeBufferPointer { Data(buffer: $0) }
+        let small = CIImage(bitmapData: data, bytesPerRow: gw * 16, size: CGSize(width: gw, height: gh),
+                            format: .RGBAf, colorSpace: nil)
+        return small.clampedToExtent()
+            .transformed(by: CGAffineTransform(scaleX: box.width / CGFloat(gw), y: box.height / CGFloat(gh)))
+            .transformed(by: CGAffineTransform(translationX: box.minX, y: box.minY))
+            .cropped(to: box)
+    }
+
+    /// Grayscale mask of a stroke (or dot) with feathered edges, positioned in image pixels.
+    static func strokeMask(points: [[Double]], radius r: CGFloat, scale: CGFloat, box: CGRect,
+                           coreFraction: CGFloat = 1.0, softness: CGFloat = 0.17) -> CIImage {
+        let k = min(1, 320 / max(box.width, box.height, 1))
+        let w = max(2, Int(ceil(box.width * k))), h = max(2, Int(ceil(box.height * k)))
+        let gray = CGColorSpaceCreateDeviceGray()
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: gray, bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return CIImage.empty() }
+        ctx.setFillColor(gray: 0, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        let pts = points.compactMap { p -> CGPoint? in
+            guard p.count == 2 else { return nil }
+            return CGPoint(x: (p[0] * scale - box.minX) * k, y: (p[1] * scale - box.minY) * k)
+        }
+        let core = r * coreFraction * k
+        ctx.setFillColor(gray: 1, alpha: 1)
+        ctx.setStrokeColor(gray: 1, alpha: 1)
+        if pts.count == 1 {
+            ctx.fillEllipse(in: CGRect(x: pts[0].x - core, y: pts[0].y - core, width: core * 2, height: core * 2))
+        } else if pts.count > 1 {
+            ctx.setLineWidth(core * 2)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            ctx.addLines(between: pts)
+            ctx.strokePath()
+        }
+        guard let cg = ctx.makeImage() else { return CIImage.empty() }
+        return CIImage(cgImage: cg)
+            .transformed(by: CGAffineTransform(scaleX: 1 / k, y: 1 / k))
+            .transformed(by: CGAffineTransform(translationX: box.minX, y: box.minY))
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: max(0.5, r * softness)])
+            .cropped(to: box)
     }
 
     // MARK: Light, color & detail
@@ -194,6 +263,52 @@ enum ImagePipeline {
                 "inputHighlightAmount": 1 + min(0, a.highlights) / 100,
                 kCIInputRadiusKey: 0,
             ])
+        }
+
+        if a.shadowRemoval > 0 || a.sunSpotRemoval > 0 {
+            // Local (large-radius) shadow lift / highlight compression evens out harsh light.
+            let sr = a.shadowRemoval / 100, ss = a.sunSpotRemoval / 100
+            img = img.clampedToExtent().applyingFilter("CIHighlightShadowAdjust", parameters: [
+                "inputShadowAmount": sr * 0.95,
+                "inputHighlightAmount": 1 - ss * 0.8,
+                kCIInputRadiusKey: 24 * sf,
+            ]).cropped(to: extent)
+            if sr > 0 {
+                // Shadows go cool and flat; give them back a little warmth and lift.
+                img = img.applyingFilter("CIToneCurve", parameters: [
+                    "inputPoint0": CIVector(x: 0, y: 0.02 * sr),
+                    "inputPoint1": CIVector(x: 0.15, y: 0.15 + 0.07 * sr),
+                    "inputPoint2": CIVector(x: 0.4, y: 0.4 + 0.03 * sr),
+                    "inputPoint3": CIVector(x: 0.7, y: 0.7),
+                    "inputPoint4": CIVector(x: 1, y: 1),
+                ])
+            }
+            if ss > 0 {
+                img = img.applyingFilter("CIToneCurve", parameters: [
+                    "inputPoint0": CIVector(x: 0, y: 0),
+                    "inputPoint1": CIVector(x: 0.3, y: 0.3),
+                    "inputPoint2": CIVector(x: 0.6, y: 0.6 - 0.02 * ss),
+                    "inputPoint3": CIVector(x: 0.85, y: 0.85 - 0.07 * ss),
+                    "inputPoint4": CIVector(x: 1, y: 1 - 0.06 * ss),
+                ])
+            }
+        }
+        if a.skinSpotRemoval > 0 {
+            // Small dark marks are darker than their blurred surroundings; "lighten" them away
+            // while keeping larger features, then blend in by strength.
+            let amt = a.skinSpotRemoval / 100
+            let blurred = img.clampedToExtent()
+                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: max(1, 7 * sf)])
+                .cropped(to: extent)
+            let lightened = blurred.applyingFilter("CILightenBlendMode", parameters: [kCIInputBackgroundImageKey: img])
+            let smoothed = lightened.clampedToExtent()
+                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: max(0.5, 1.2 * sf)])
+                .cropped(to: extent)
+            img = smoothed.applyingFilter("CIDissolveTransition", parameters: [
+                kCIInputImageKey: img,
+                kCIInputTargetImageKey: smoothed,
+                kCIInputTimeKey: amt * 0.85,
+            ]).cropped(to: extent)
         }
 
         let c = a.contrast / 100, w = a.whites / 100, b = a.blacks / 100

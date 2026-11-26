@@ -1,11 +1,14 @@
+import AppKit
 import SwiftUI
 
-/// A large, friendly slider with a center "zero" mark, value readout,
-/// and double-click-the-label to reset.
+/// A large, friendly slider with a center "zero" mark and value readout.
+/// Reset to default: double-click the slider or its name, or Option-click the slider.
 struct RPSlider: View {
     let title: String
     @Binding var value: Double
     var range: ClosedRange<Double> = -100...100
+    /// Value restored by double-click / Option-click. Defaults to 0 (clamped into range).
+    var defaultValue: Double? = nil
     var track: [Color]? = nil
     var format: (Double) -> String = { v in
         let r = Int(v.rounded())
@@ -14,6 +17,17 @@ struct RPSlider: View {
     var onCommit: () -> Void
 
     @State private var dragging = false
+    /// True while a reset click is held, so the drag that follows it is ignored.
+    @State private var resetting = false
+
+    private var resetValue: Double {
+        defaultValue ?? min(max(0, range.lowerBound), range.upperBound)
+    }
+
+    private func reset() {
+        value = resetValue
+        onCommit()
+    }
 
     var body: some View {
         VStack(spacing: 7) {
@@ -27,11 +41,8 @@ struct RPSlider: View {
                     .foregroundColor(abs(value) < 0.5 ? .rpSlate : .rpInk)
             }
             .contentShape(Rectangle())
-            .onTapGesture(count: 2) {
-                value = 0
-                onCommit()
-            }
-            .help("Double-click to reset")
+            .onTapGesture(count: 2) { reset() }
+            .help("Double-click or Option-click to reset")
 
             GeometryReader { geo in
                 let w = geo.size.width
@@ -50,7 +61,7 @@ struct RPSlider: View {
 
                     if track == nil {
                         Rectangle()
-                            .fill(Color.rpCharcoal)
+                            .fill(Color.rpAccent)
                             .frame(width: abs(x - zeroX), height: 4)
                             .offset(x: min(x, zeroX))
                     }
@@ -58,7 +69,7 @@ struct RPSlider: View {
                         Rectangle().fill(Color.rpSilver).frame(width: 1, height: 9).offset(x: zeroX - 0.5)
                     }
                     Circle()
-                        .fill(Color.white)
+                        .fill(Color.rpThumb)
                         .overlay(Circle().stroke(dragging ? Color.rpCharcoal : Color.rpSilver, lineWidth: dragging ? 2 : 1))
                         .shadow(color: .black.opacity(0.15), radius: 1.5, y: 1)
                         .frame(width: 15, height: 15)
@@ -69,14 +80,25 @@ struct RPSlider: View {
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { g in
+                            if !dragging && !resetting {
+                                // First event of a click: Option-click or a double-click resets.
+                                let event = NSApp.currentEvent
+                                if event?.modifierFlags.contains(.option) == true || (event?.clickCount ?? 1) >= 2 {
+                                    resetting = true
+                                    value = resetValue
+                                    return
+                                }
+                            }
+                            if resetting { return }
                             dragging = true
                             let t = min(max(0, g.location.x / w), 1)
                             var v = range.lowerBound + t * (range.upperBound - range.lowerBound)
-                            if range.lowerBound < 0, abs(v) < (range.upperBound - range.lowerBound) * 0.012 { v = 0 }   // snap to zero
+                            if abs(v - resetValue) < (range.upperBound - range.lowerBound) * 0.012 { v = resetValue }   // snap to default
                             value = v
                         }
                         .onEnded { _ in
                             dragging = false
+                            resetting = false
                             onCommit()
                         }
                 )
@@ -115,7 +137,7 @@ struct HistogramView: View {
                 HStack {
                     ForEach(1..<4) { _ in
                         Spacer()
-                        Rectangle().fill(Color.white.opacity(0.5)).frame(width: 1)
+                        Rectangle().fill(Color.rpCard.opacity(0.5)).frame(width: 1)
                     }
                     Spacer()
                 }
@@ -141,7 +163,7 @@ struct ChipButton: View {
                 .padding(.horizontal, 4)
                 .padding(.vertical, 6)
                 .frame(maxWidth: .infinity)
-                .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.rpCharcoal : Color.rpPaper))
+                .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.rpAccent : Color.rpPaper))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(selected ? Color.clear : Color.rpMist))
                 .contentShape(Rectangle())
         }

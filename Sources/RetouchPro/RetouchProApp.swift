@@ -11,16 +11,21 @@ struct RetouchProApp: App {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 1000, minHeight: 640)
-                .preferredColorScheme(.light)
         }
         .defaultSize(width: 1400, height: 880)
         .commands { EditorCommands(model: model) }
+
+        // Provides "Retouch Pro ▸ Settings…" and ⌘, automatically.
+        Settings {
+            SettingsView()
+        }
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.appearance = NSAppearance(named: .aqua)
+        let saved = UserDefaults.standard.string(forKey: SettingsKey.appearance) ?? AppearanceMode.system.rawValue
+        (AppearanceMode(rawValue: saved) ?? .system).apply()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

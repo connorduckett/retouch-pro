@@ -111,7 +111,7 @@ struct EmptyStateView: View {
         .padding(56)
         .background(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(targeted ? Color.white : Color.rpPaper.opacity(0.6))
+                .fill(targeted ? Color.rpCard : Color.rpPaper.opacity(0.6))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 22, style: .continuous)

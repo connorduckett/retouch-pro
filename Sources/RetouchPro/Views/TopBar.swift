@@ -107,7 +107,7 @@ struct CompareButton: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .foregroundColor(model.showOriginal ? .white : .rpInk)
-            .background(RoundedRectangle(cornerRadius: 7).fill(model.showOriginal ? Color.rpCharcoal : .white))
+            .background(RoundedRectangle(cornerRadius: 7).fill(model.showOriginal ? Color.rpAccent : Color.rpCard))
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.rpSilver))
             .contentShape(Rectangle())
             .gesture(

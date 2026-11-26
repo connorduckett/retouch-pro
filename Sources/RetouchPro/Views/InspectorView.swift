@@ -23,6 +23,7 @@ struct InspectorView: View {
                     case .looks: LooksPanel()
                     case .crop: CropPanel()
                     case .heal: HealPanel()
+                    case .layers: LayersPanel()
                     }
                 }
                 .padding(12)
@@ -34,22 +35,67 @@ struct InspectorView: View {
 
 // MARK: - Adjust
 
-struct AdjustPanel: View {
-    @EnvironmentObject var model: EditorModel
+/// The full set of adjustment sliders, bound to any `Adjustments` (the photo's or a layer's).
+struct AdjustmentSliders: View {
+    @Binding var adjustments: Adjustments
+    var onCommit: () -> Void
+    var onReset: (_ change: (inout Adjustments) -> Void) -> Void
+    var includeEffects = true
 
     private func slider(_ title: String, _ key: WritableKeyPath<Adjustments, Double>,
                         range: ClosedRange<Double> = -100...100, track: [Color]? = nil) -> some View {
         RPSlider(
             title: title,
-            value: Binding(
-                get: { model.state.adjustments[keyPath: key] },
-                set: { model.state.adjustments[keyPath: key] = $0 }
-            ),
+            value: Binding(get: { adjustments[keyPath: key] }, set: { adjustments[keyPath: key] = $0 }),
             range: range,
             track: track,
-            onCommit: { model.commit() }
+            onCommit: onCommit
         )
     }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            SectionCard(title: "Light", onReset: { onReset { $0.resetLight() } }) {
+                slider("Exposure", \.exposure)
+                slider("Contrast", \.contrast)
+                slider("Highlights", \.highlights)
+                slider("Shadows", \.shadows)
+                slider("Whites", \.whites)
+                slider("Blacks", \.blacks)
+            }
+            SectionCard(title: "Color", onReset: { onReset { $0.resetColor() } }) {
+                slider("Temperature", \.temperature, track: [Color(hex: 0x6E9BD6), Color(hex: 0xBDBDBD), Color(hex: 0xE3B85C)])
+                slider("Tint", \.tint, track: [Color(hex: 0x7BBE7B), Color(hex: 0xBDBDBD), Color(hex: 0xC97BC4)])
+                slider("Vibrance", \.vibrance)
+                slider("Saturation", \.saturation)
+            }
+            SectionCard(title: "Retouch", onReset: { onReset { $0.resetRetouch() } }) {
+                slider("Remove Shadows", \.shadowRemoval, range: 0...100)
+                slider("Tame Sun Spots", \.sunSpotRemoval, range: 0...100)
+                slider("Fade Skin Spots", \.skinSpotRemoval, range: 0...100)
+                Text("For just one area, use Layers ▸ Add ▸ Remove Shadows / Sun Spots and paint where you need it.")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(.rpSlate)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            SectionCard(title: "Detail", onReset: { onReset { $0.resetDetail() } }) {
+                slider("Clarity", \.clarity)
+                slider("Sharpen", \.sharpness, range: 0...100)
+                slider("Noise Reduction", \.noiseReduction, range: 0...100)
+            }
+            if includeEffects {
+                SectionCard(title: "Effects", onReset: { onReset { $0.resetEffects() } }) {
+                    slider("Vignette", \.vignette)
+                    slider("Grain", \.grain, range: 0...100)
+                    slider("Fade", \.fade, range: 0...100)
+                }
+            }
+        }
+    }
+}
+
+struct AdjustPanel: View {
+    @EnvironmentObject var model: EditorModel
 
     var body: some View {
         VStack(spacing: 12) {
@@ -64,35 +110,16 @@ struct AdjustPanel: View {
                 .buttonStyle(RPButtonStyle())
             }
             .padding(12)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white))
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.rpCard))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.rpMist))
 
-            SectionCard(title: "Light", onReset: { model.apply { $0.adjustments.resetLight() } }) {
-                slider("Exposure", \.exposure)
-                slider("Contrast", \.contrast)
-                slider("Highlights", \.highlights)
-                slider("Shadows", \.shadows)
-                slider("Whites", \.whites)
-                slider("Blacks", \.blacks)
-            }
-            SectionCard(title: "Color", onReset: { model.apply { $0.adjustments.resetColor() } }) {
-                slider("Temperature", \.temperature, track: [Color(hex: 0x6E9BD6), Color(hex: 0xE2E2E2), Color(hex: 0xE3B85C)])
-                slider("Tint", \.tint, track: [Color(hex: 0x7BBE7B), Color(hex: 0xE2E2E2), Color(hex: 0xC97BC4)])
-                slider("Vibrance", \.vibrance)
-                slider("Saturation", \.saturation)
-            }
-            SectionCard(title: "Detail", onReset: { model.apply { $0.adjustments.resetDetail() } }) {
-                slider("Clarity", \.clarity)
-                slider("Sharpen", \.sharpness, range: 0...100)
-                slider("Noise Reduction", \.noiseReduction, range: 0...100)
-            }
-            SectionCard(title: "Effects", onReset: { model.apply { $0.adjustments.resetEffects() } }) {
-                slider("Vignette", \.vignette)
-                slider("Grain", \.grain, range: 0...100)
-                slider("Fade", \.fade, range: 0...100)
-            }
+            AdjustmentSliders(
+                adjustments: Binding(get: { model.state.adjustments }, set: { model.state.adjustments = $0 }),
+                onCommit: { model.commit() },
+                onReset: { change in model.apply { change(&$0.adjustments) } }
+            )
 
-            Text("Tip: double-click any slider’s name to reset it.")
+            Text("Tip: double-click or Option-click a slider to reset it.")
                 .font(.system(size: 11))
                 .foregroundColor(.rpSlate)
                 .padding(.top, 2)
@@ -114,6 +141,7 @@ struct LooksPanel: View {
                         title: Look.find(model.state.lookID)?.name ?? "Look",
                         value: Binding(get: { model.state.lookAmount }, set: { model.state.lookAmount = $0 }),
                         range: 0...100,
+                        defaultValue: 100,
                         format: { "\(Int($0.rounded()))%" },
                         onCommit: { model.commit() }
                     )
@@ -162,7 +190,7 @@ private struct LookTile: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(selected ? Color.rpCharcoal : (hover ? Color.rpSilver : .clear), lineWidth: selected ? 3 : 1)
+                        .stroke(selected ? Color.rpInk : (hover ? Color.rpSilver : .clear), lineWidth: selected ? 3 : 1)
                 )
                 Text(name)
                     .font(.system(size: 11, weight: selected ? .semibold : .regular))
@@ -251,7 +279,7 @@ struct HealPanel: View {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "hand.point.up.left")
                         .foregroundColor(.rpCharcoal)
-                    Text("Click on blemishes, dust spots or small distractions. Retouch Pro finds matching texture nearby and blends it in.")
+                    Text("Click a blemish or dust spot, or brush over a larger distraction (a wire, a stray hair). Retouch Pro copies clean texture from nearby and blends its color and light in seamlessly.")
                         .font(.system(size: 12))
                         .foregroundColor(.rpInk)
                         .fixedSize(horizontal: false, vertical: true)
@@ -259,11 +287,12 @@ struct HealPanel: View {
                 RPSlider(
                     title: "Brush Size",
                     value: $model.healBrushSize,
-                    range: 8...200,
+                    range: 8...300,
+                    defaultValue: 40,
                     format: { "\(Int($0.rounded())) pt" },
                     onCommit: {}
                 )
-                Text("Tip: zoom in (⌘+) for tiny spots.")
+                Text("Tip: make the brush just a little bigger than the spot, and zoom in (⌘+) for tiny ones.")
                     .font(.system(size: 11))
                     .foregroundColor(.rpSlate)
             }
