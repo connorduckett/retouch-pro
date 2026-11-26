@@ -32,14 +32,10 @@ struct ContentView: View {
             }
         }
         .background(Color.rpPaper)
-        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
-            guard let provider = providers.first else { return false }
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                if let url {
-                    DispatchQueue.main.async { model.open(url: url) }
-                }
-            }
-            return true
+        .onDrop(of: DropHandler.acceptedTypes, isTargeted: $dropTargeted) { providers in
+            DropHandler.handle(providers,
+                               open: { model.open(url: $0) },
+                               failed: { model.loadError = $0 })
         }
         .sheet(isPresented: $showExport) {
             ExportSheet(isPresented: $showExport)

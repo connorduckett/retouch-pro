@@ -89,7 +89,8 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    func open(url: URL) {
+    func open(url rawURL: URL) {
+        let url = DropHandler.resolve(rawURL)
         guard confirmDiscardIfNeeded() else { return }
         let token = UUID()
         loadToken = token
