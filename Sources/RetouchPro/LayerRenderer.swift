@@ -87,8 +87,9 @@ enum LayerRenderer {
     }
 
     /// Red overlay showing where a mask applies.
-    static func maskOverlay(_ mask: CIImage, over img: CIImage, extent: CGRect) -> CIImage {
-        let red = CIImage(color: CIColor(red: 0.95, green: 0.2, blue: 0.25, alpha: 1)).cropped(to: extent)
+    static func maskOverlay(_ mask: CIImage, over img: CIImage, extent: CGRect,
+                            color: CIColor = CIColor(red: 0.95, green: 0.2, blue: 0.25)) -> CIImage {
+        let red = CIImage(color: color).cropped(to: extent)
         let m = mask.applyingFilter("CIColorMatrix", parameters: [
             "inputRVector": CIVector(x: 0.5, y: 0, z: 0, w: 0),
             "inputGVector": CIVector(x: 0, y: 0.5, z: 0, w: 0),

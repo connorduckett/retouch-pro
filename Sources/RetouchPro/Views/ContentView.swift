@@ -5,6 +5,7 @@ struct ContentView: View {
     @EnvironmentObject var model: EditorModel
     @State private var showExport = false
     @State private var dropTargeted = false
+    @State private var showShortcuts = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,7 +29,7 @@ struct ContentView: View {
                             LoadingBadge()
                         }
                     }
-                    Filmstrip()
+                    if model.showFilmstrip { Filmstrip() }
                 }
                 if model.hasImage {
                     Rectangle().fill(Color.rpMist).frame(width: 1)
@@ -52,6 +53,14 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showExport)) { _ in
             if model.hasImage { showExport = true }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .showShortcuts)) { _ in
+            showShortcuts = true
+        }
+        .background(
+            Color.clear.sheet(isPresented: $showShortcuts) {
+                KeyboardShortcutsView(isPresented: $showShortcuts)
+            }
+        )
         .alert("Couldn’t open photo", isPresented: Binding(
             get: { model.loadError != nil },
             set: { if !$0 { model.loadError = nil } }

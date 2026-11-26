@@ -44,7 +44,7 @@ private struct ToolRailButton: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
-        .help(Text(verbatim: "\(tool.title) (⌘\(tool.shortcut))"))
+        .help(Text(verbatim: tool.letter.isEmpty ? tool.title : "\(tool.title) (\(tool.letter))"))
         .onHover { hover = $0 }
     }
 }

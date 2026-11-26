@@ -33,7 +33,7 @@ struct CanvasView: View {
                 MagnificationGesture()
                     .onChanged { value in
                         if pinchBase == nil { pinchBase = model.zoom }
-                        model.zoom = min(8, max(1, (pinchBase ?? 1) * value))
+                        model.zoom = min(16, max(1, (pinchBase ?? 1) * value))
                     }
                     .onEnded { _ in pinchBase = nil }
             )
@@ -66,7 +66,14 @@ struct CanvasView: View {
             } else {
                 Rectangle().fill(Color.rpSilver.opacity(0.3))
             }
-            if !model.showOriginal {
+            if model.isPickingWhiteBalance && !model.showOriginal {
+                Color.white.opacity(0.001)
+                    .contentShape(Rectangle())
+                    .gesture(SpatialTapGesture().onEnded { v in
+                        model.setWhiteBalance(atDisplayPoint: CGPoint(x: v.location.x / size.width, y: v.location.y / size.height))
+                    })
+                    .onHover { inside in if inside { NSCursor.crosshair.push() } else { NSCursor.pop() } }
+            } else if !model.showOriginal {
                 switch model.tool {
                 case .crop: CropOverlay(size: size)
                 case .heal: HealOverlay(size: size)
@@ -82,7 +89,9 @@ struct CanvasView: View {
 
     @ViewBuilder
     private var statusPill: some View {
-        if model.showOriginal {
+        if model.isPickingWhiteBalance {
+            pill("Click something that should be neutral gray or white · press W to cancel")
+        } else if model.showOriginal {
             pill("Showing original")
         } else if model.tool == .heal {
             pill("Click a spot, or brush over a distraction, to remove it")

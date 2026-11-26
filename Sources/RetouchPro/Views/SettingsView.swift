@@ -9,6 +9,7 @@ enum SettingsKey {
     static let keepMetadata = "defaultKeepMetadata"
     static let showHealMarkers = "showHealMarkers"
     static let confirmDiscard = "confirmDiscard"
+    static let advanceAfterFlag = "advanceAfterFlag"
 }
 
 enum AutoEnhanceStyle: String, CaseIterable, Identifiable {
@@ -35,6 +36,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.keepMetadata) private var keepMetadata = true
     @AppStorage(SettingsKey.showHealMarkers) private var showHealMarkers = false
     @AppStorage(SettingsKey.confirmDiscard) private var confirmDiscard = true
+    @AppStorage(SettingsKey.advanceAfterFlag) private var advanceAfterFlag = false
 
     @State private var tab = 0
 
@@ -118,6 +120,10 @@ struct SettingsView: View {
 
             settingRow("Healing") {
                 Toggle("Outline healed spots while using the Heal tool", isOn: $showHealMarkers)
+            }
+
+            settingRow("Culling") {
+                Toggle("Go to the next photo after flagging (P, X, U)", isOn: $advanceAfterFlag)
             }
 
             settingRow("Sliders") {

@@ -15,7 +15,22 @@ final class EditorModel: ObservableObject {
 
     // Editing
     @Published var state = EditState() {
-        didSet { if state != oldValue { scheduleRender() } }
+        didSet {
+            guard state != oldValue else { return }
+            hideMaskOverlayIfAdjusting(oldValue)
+            scheduleRender()
+        }
+    }
+
+    /// The red selection highlight is great for seeing what's selected, but it hides the edit itself —
+    /// so it turns off as soon as you change the layer's sliders (press O or "Show mask" to bring it back).
+    private func hideMaskOverlayIfAdjusting(_ old: EditState) {
+        guard showMaskOverlay, let id = selectedLayerID,
+              let before = old.layers.first(where: { $0.id == id }),
+              let after = state.layers.first(where: { $0.id == id }) else { return }
+        if before.adjustments != after.adjustments || before.opacity != after.opacity || before.blend != after.blend {
+            showMaskOverlay = false
+        }
     }
     @Published var tool: Tool = .adjust {
         didSet {
@@ -125,9 +140,209 @@ final class EditorModel: ObservableObject {
         load(url: url, photoID: id, initialState: photo.edits ?? EditState())
     }
 
+    /// Flags the photos selected in the library, or the photo being edited.
+    func flag(_ flag: PhotoFlag?) {
+        let lib = Library.shared
+        let ids: [UUID]
+        if mode == .library {
+            ids = Array(lib.gridSelection)
+        } else {
+            ids = currentPhotoID.map { [$0] } ?? []
+        }
+        guard !ids.isEmpty else { return }
+        lib.setFlag(flag, for: ids)
+        if mode == .edit, UserDefaults.standard.bool(forKey: SettingsKey.advanceAfterFlag) {
+            stepPhoto(1)
+        } else if mode == .library, ids.count == 1, UserDefaults.standard.bool(forKey: SettingsKey.advanceAfterFlag) {
+            let photos = lib.visiblePhotos()
+            if let i = photos.firstIndex(where: { $0.id == ids[0] }), i + 1 < photos.count {
+                lib.gridSelection = [photos[i + 1].id]
+            }
+        }
+    }
+
+    // MARK: Shortcut helpers
+
+    @Published var showFilmstrip = true
+    @Published var isPickingWhiteBalance = false
+
+    /// In the library grid, arrows move the selection; in the editor they change photo.
+    func stepPhoto(_ delta: Int, inLibraryGrid: Bool) {
+        guard inLibraryGrid else { stepPhoto(delta); return }
+        let lib = Library.shared
+        let photos = lib.visiblePhotos()
+        guard !photos.isEmpty else { return }
+        let current = photos.firstIndex { lib.gridSelection.contains($0.id) } ?? -1
+        let j = min(max(0, current + delta), photos.count - 1)
+        lib.gridSelection = [photos[j].id]
+    }
+
+    /// Removes the selected library photos (from the album when viewing one, otherwise from the library).
+    func removeSelectedPhotos() {
+        let lib = Library.shared
+        let ids = lib.visiblePhotos().map(\.id).filter(lib.gridSelection.contains)
+        guard !ids.isEmpty else { return }
+        if case .album(let albumID) = lib.selection {
+            lib.remove(ids, fromAlbum: albumID)
+            lib.gridSelection = []
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = ids.count == 1 ? "Remove this photo from the library?" : "Remove \(ids.count) photos from the library?"
+        alert.informativeText = "They’ll be removed from every album and their edits will be forgotten. The original files stay on your Mac."
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if let current = currentPhotoID, ids.contains(current) { close() }
+        lib.removeFromLibrary(ids)
+        lib.gridSelection = []
+    }
+
+    /// Zoom level (relative to Fit) that shows the photo at actual pixels × `factor`.
+    func zoomForActualPixels(_ factor: CGFloat = 1) -> CGFloat {
+        let out = tool == .crop ? frameSize : outputSize
+        guard out.width > 0, viewportSize.width > 0 else { return 1 }
+        let fit = min(viewportSize.width / out.width, viewportSize.height / out.height)
+        return max(1, min(16, factor / (fit * backingScale)))
+    }
+
+    func zoomToActual(_ factor: CGFloat) { zoom = zoomForActualPixels(factor) }
+
+    func toggleZoomState() {
+        if zoom > 1.01 { zoom = 1; return }
+        let actual = zoomForActualPixels(1)
+        zoom = actual > 1.05 ? actual : 2   // small photos: 100% is already smaller than Fit, so go 2×
+    }
+
+    func selectLayerEdge(top: Bool) {
+        guard !state.layers.isEmpty else { return }
+        tool = .layers
+        selectedLayerID = top ? state.layers.last?.id : state.layers.first?.id
+    }
+
+    func moveSelectedLayerToEdge(top: Bool) {
+        guard let i = selectedLayerIndex else { return }
+        apply {
+            let layer = $0.layers.remove(at: i)
+            if top { $0.layers.append(layer) } else { $0.layers.insert(layer, at: 0) }
+        }
+    }
+
+    func invertSelectedMask() {
+        guard selectedLayer?.mask.mode != MaskMode.none else { return }
+        updateSelectedLayer { $0.mask.inverted.toggle() }
+        commit()
+    }
+
+    /// B: paint on the selected layer's mask, or start a new brush-masked adjustment layer.
+    func startBrushMask() {
+        tool = .layers
+        maskErase = false
+        if let layer = selectedLayer, layer.mask.mode == .brush || layer.mask.mode.isAutomatic {
+            refineAutoMask = true
+            if layer.isContent { editingMask = true }
+            return
+        }
+        addMaskLayer(.brush)
+    }
+
+    func addMaskLayer(_ mode: MaskMode) {
+        addLayer(.adjustment)
+        let names: [MaskMode: String] = [.brush: "Brush Mask", .linear: "Gradient Mask", .radial: "Radial Mask"]
+        updateSelectedLayer {
+            $0.mask.mode = mode
+            $0.name = names[mode] ?? $0.name
+            if mode == .linear || mode == .radial {
+                // Center the gradient on what's currently on screen.
+                let c = self.displayToSource(CGPoint(x: 0.5, y: 0.5))
+                if mode == .radial { $0.mask.center = [c.x, c.y] }
+                if mode == .linear {
+                    let a = self.displayToSource(CGPoint(x: 0.5, y: 0.15)), b = self.displayToSource(CGPoint(x: 0.5, y: 0.5))
+                    $0.mask.start = [a.x, a.y]; $0.mask.end = [b.x, b.y]
+                }
+            }
+        }
+        commit()
+        showMaskOverlay = true
+    }
+
+    func resizeBrush(smaller: Bool) {
+        let f = smaller ? 0.85 : 1 / 0.85
+        if tool == .heal {
+            healBrushSize = min(300, max(8, healBrushSize * f))
+        } else {
+            maskBrushSize = min(400, max(5, maskBrushSize * f))
+        }
+    }
+
+    /// Sets Temperature and Tint so the clicked spot becomes neutral gray.
+    func setWhiteBalance(atDisplayPoint point: CGPoint) {
+        isPickingWhiteBalance = false
+        guard let proxy = sourceProxy else { return }
+        var adj = state.adjustments
+        let base = state
+        workQueue.async { [weak self] in
+            func sample(_ a: Adjustments) -> SIMD3<Float>? {
+                var s = base
+                s.adjustments = a
+                let img = ImagePipeline.render(source: proxy, state: s)
+                let e = img.extent
+                let px = e.minX + point.x * e.width, py = e.minY + (1 - point.y) * e.height
+                let r: CGFloat = max(2, e.width / 300)
+                var buf = [Float](repeating: 0, count: 4)
+                let avg = img.cropped(to: CGRect(x: px - r, y: py - r, width: r * 2, height: r * 2))
+                    .applyingFilter("CIAreaAverage", parameters: [
+                        kCIInputExtentKey: CIVector(cgRect: CGRect(x: px - r, y: py - r, width: r * 2, height: r * 2)),
+                    ])
+                ImagePipeline.context.render(avg, toBitmap: &buf, rowBytes: 16,
+                                             bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                             format: .RGBAf, colorSpace: ImagePipeline.linearSRGB)
+                let c = SIMD3(buf[0], buf[1], buf[2])
+                return c.sum() > 0.002 ? c : nil
+            }
+            adj = EditorModel.solveWhiteBalance(start: adj, sample: sample)
+            DispatchQueue.main.async {
+                self?.apply {
+                    $0.adjustments.temperature = adj.temperature.rounded()
+                    $0.adjustments.tint = adj.tint.rounded()
+                }
+            }
+        }
+    }
+
+    /// Newton's method on (blue−red, green−magenta) error, measuring how Temperature and Tint
+    /// actually move the clicked color (they interact), so it lands on neutral without overshooting.
+    static func solveWhiteBalance(start: Adjustments, sample: (Adjustments) -> SIMD3<Float>?) -> Adjustments {
+        var adj = start
+        func error(_ a: Adjustments) -> SIMD2<Double>? {
+            guard let c = sample(a) else { return nil }
+            let rb = Double(c.x + c.z) / 2
+            return SIMD2((Double(c.z) - Double(c.x)) / max(0.001, rb),
+                         (Double(c.y) - rb) / max(0.001, Double(c.y)))
+        }
+        for _ in 0..<6 {
+            guard let e = error(adj) else { break }
+            if abs(e.x) < 0.006 && abs(e.y) < 0.006 { break }
+            let h = 6.0
+            var aT = adj; aT.temperature += h
+            var aG = adj; aG.tint += h
+            guard let eT = error(aT), let eG = error(aG) else { break }
+            let j11 = (eT.x - e.x) / h, j21 = (eT.y - e.y) / h
+            let j12 = (eG.x - e.x) / h, j22 = (eG.y - e.y) / h
+            let det = j11 * j22 - j12 * j21
+            guard abs(det) > 1e-9 else { break }
+            var dT = -( j22 * e.x - j12 * e.y) / det
+            var dG = -(-j21 * e.x + j11 * e.y) / det
+            dT = max(-40, min(40, dT)); dG = max(-40, min(40, dG))
+            adj.temperature = max(-100, min(100, adj.temperature + dT))
+            adj.tint = max(-100, min(100, adj.tint + dG))
+        }
+        return adj
+    }
+
     /// Moves to the previous/next photo in the current library collection.
     func stepPhoto(_ delta: Int) {
-        let photos = Library.shared.photos(in: Library.shared.selection)
+        let photos = Library.shared.visiblePhotos()
         guard !photos.isEmpty else { return }
         let i = photos.firstIndex { $0.id == currentPhotoID } ?? -1
         let j = min(max(0, i + delta), photos.count - 1)
@@ -529,6 +744,16 @@ final class EditorModel: ObservableObject {
         didSet { if showMaskOverlay != oldValue { scheduleRender() } }
     }
     @Published var maskBrushSize: Double = 60
+    static let overlayColors: [(String, CIColor)] = [
+        ("Red", CIColor(red: 0.95, green: 0.2, blue: 0.25)),
+        ("Green", CIColor(red: 0.2, green: 0.85, blue: 0.35)),
+        ("Blue", CIColor(red: 0.2, green: 0.45, blue: 0.95)),
+        ("White", CIColor(red: 1, green: 1, blue: 1)),
+        ("Black", CIColor(red: 0, green: 0, blue: 0)),
+    ]
+    @Published var maskOverlayColorIndex = 0 {
+        didSet { if showMaskOverlay { scheduleRender() } }
+    }
     @Published var maskErase = false
     /// When true, clicks on the canvas add pen-tool points to the selected path layer.
     @Published var penActive = true
@@ -744,12 +969,15 @@ final class EditorModel: ObservableObject {
     /// Adds a painted mask stroke to the selected layer. Points are display-normalized (top-left origin).
     func addMaskStroke(displayPoints: [CGPoint], displaySize: CGSize) {
         guard let i = selectedLayerIndex, !displayPoints.isEmpty else { return }
+        // Holding Option while painting erases (like Lightroom).
+        let erase = maskErase != (NSEvent.modifierFlags.contains(.option))
         let pts = displayPoints.map(displayToSource).map { [Double($0.x), Double($0.y)] }
         let r = displayLengthToSource(maskBrushSize / 2, displayWidth: displaySize.width)
         apply {
             if !$0.layers[i].mask.mode.isAutomatic { $0.layers[i].mask.mode = .brush }
-            $0.layers[i].mask.strokes.append(MaskStroke(points: pts, radius: r, erase: maskErase))
+            $0.layers[i].mask.strokes.append(MaskStroke(points: pts, radius: r, erase: erase))
         }
+        showMaskOverlay = true
     }
 
     // MARK: Rendering
@@ -770,6 +998,7 @@ final class EditorModel: ObservableObject {
         let ignoreCrop = tool == .crop
         let token = loadToken
         let overlayLayer = (tool == .layers && showMaskOverlay) ? selectedLayerID : nil
+        let overlayColor = Self.overlayColors[maskOverlayColorIndex % Self.overlayColors.count].1
 
         // Pick a source resolution: the proxy is plenty for "fit"; zooming in uses the full photo.
         var source = proxy
@@ -785,7 +1014,8 @@ final class EditorModel: ObservableObject {
 
         renderQueue.async { [weak self] in
             let output = ImagePipeline.render(source: source, state: state, ignoreCrop: ignoreCrop,
-                                              maskOverlayLayer: overlayLayer)
+                                              maskOverlayLayer: overlayLayer,
+                                              maskOverlayColor: overlayColor)
             let cg = ImagePipeline.cgImage(output)
             let hist = cg.map { ImagePipeline.histogram(of: $0) } ?? []
             DispatchQueue.main.async {
@@ -990,7 +1220,7 @@ final class EditorModel: ObservableObject {
 
     // MARK: Zoom
 
-    func zoomIn() { zoom = min(8, zoom * 1.5) }
+    func zoomIn() { zoom = min(16, zoom * 1.5) }
     func zoomOut() { zoom = max(1, zoom / 1.5) }
     func zoomToFit() { zoom = 1 }
 }

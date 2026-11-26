@@ -348,6 +348,17 @@ enum Tool: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Single-letter shortcut (Photoshop/Lightroom style).
+    var letter: String {
+        switch self {
+        case .adjust: return "E"
+        case .looks: return ""
+        case .crop: return "C"
+        case .heal: return "J"
+        case .layers: return "V"
+        }
+    }
+
     var shortcut: Character {
         switch self {
         case .adjust: return "1"

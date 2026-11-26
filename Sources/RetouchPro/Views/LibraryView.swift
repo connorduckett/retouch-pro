@@ -32,6 +32,8 @@ private struct LibrarySidebar: View {
                 sectionHeader("Library")
                 row(.all, icon: "photo.on.rectangle", title: "All Photos", count: library.photos.count)
                 row(.edited, icon: "slider.horizontal.3", title: "Edited", count: library.photos.filter(\.isEdited).count)
+                row(.picks, icon: "flag.fill", title: "Picks", count: library.photos.filter { $0.flag == .pick }.count)
+                row(.rejected, icon: "xmark.circle", title: "Rejected", count: library.photos.filter { $0.flag == .reject }.count)
 
                 HStack {
                     sectionHeader("Folders")
@@ -280,13 +282,16 @@ enum PhotoDrag {
 private struct PhotoGrid: View {
     @EnvironmentObject var model: EditorModel
     @ObservedObject private var library = Library.shared
-    @State private var selected: Set<UUID> = []
     @State private var anchor: UUID?
+    private var selected: Set<UUID> {
+        get { library.gridSelection }
+        nonmutating set { library.gridSelection = newValue }
+    }
     @State private var thumbSize: Double = 170
     @State private var dropTargeted = false
 
     var body: some View {
-        let photos = library.photos(in: library.selection)
+        let photos = library.visiblePhotos()
         VStack(spacing: 0) {
             toolbar(photos)
             Rectangle().fill(Color.rpMist).frame(height: 1)
@@ -322,7 +327,6 @@ private struct PhotoGrid: View {
                 }
             }
         }
-        .onChange(of: library.selection) { _ in selected = [] }
     }
 
     private func toolbar(_ photos: [LibraryPhoto]) -> some View {
@@ -337,7 +341,21 @@ private struct PhotoGrid: View {
                     .foregroundColor(.rpSlate)
             }
             Spacer()
+            Picker("", selection: $library.flagFilter) {
+                ForEach(FlagFilter.allCases) { f in
+                    Text(f.rawValue).tag(f)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("Show only picks, unflagged or rejected photos")
             if !selected.isEmpty {
+                HStack(spacing: 2) {
+                    IconButton(systemName: "flag.fill", help: "Pick (P)") { model.flag(.pick) }
+                    IconButton(systemName: "xmark", help: "Reject (X)") { model.flag(.reject) }
+                    IconButton(systemName: "flag.slash", help: "Unflag (U)") { model.flag(nil) }
+                }
                 Menu {
                     albumMenu(Array(selected))
                 } label: {
@@ -401,6 +419,11 @@ private struct PhotoGrid: View {
     private func contextMenu(for photo: LibraryPhoto, in photos: [LibraryPhoto]) -> some View {
         let ids = selected.contains(photo.id) ? photos.map(\.id).filter(selected.contains) : [photo.id]
         Button("Edit") { model.openPhoto(photo.id) }
+        Menu("Flag") {
+            Button("Pick  (P)") { library.setFlag(.pick, for: ids) }
+            Button("Reject  (X)") { library.setFlag(.reject, for: ids) }
+            Button("Unflag  (U)") { library.setFlag(nil, for: ids) }
+        }
         Menu("Add to Album") { albumMenu(ids) }
         if case .album(let albumID) = library.selection {
             Button("Remove from Album") { library.remove(ids, fromAlbum: albumID); selected = [] }
@@ -444,7 +467,8 @@ private struct PhotoGrid: View {
             Image(systemName: library.selection == .all ? "photo.stack" : "rectangle.stack")
                 .font(.system(size: 42, weight: .light))
                 .foregroundColor(.rpCharcoal)
-            Text(library.selection == .all ? "Your library is empty" : "No photos here yet")
+            Text(library.selection == .all && library.flagFilter == .all ? "Your library is empty"
+                 : library.flagFilter != .all ? "No \(library.flagFilter.rawValue.lowercased()) photos here" : "No photos here yet")
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundColor(.rpInk)
             Text(library.selection == .all
@@ -491,6 +515,16 @@ struct PhotoCell: View {
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(selected ? Color.rpAccent : (current ? Color.rpSlate : .clear), lineWidth: selected ? 3 : 2)
                 )
+                if let flag = photo.flag {
+                    Image(systemName: flag == .pick ? "flag.fill" : "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(flag == .pick ? .rpAccent : .white)
+                        .padding(4)
+                        .background(Circle().fill(flag == .pick ? Color.white : Color.black.opacity(0.75)))
+                        .padding(5)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .help(flag == .pick ? "Pick" : "Rejected")
+                }
                 if photo.isEdited {
                     Image(systemName: "slider.horizontal.3")
                         .font(.system(size: 9, weight: .bold))
@@ -509,6 +543,7 @@ struct PhotoCell: View {
                     .truncationMode(.middle)
             }
         }
+        .opacity(photo.flag == .reject ? 0.45 : 1)
         .contentShape(Rectangle())
         .onAppear(perform: load)
         .onChange(of: library.thumbnailVersion[photo.id]) { _ in load() }
@@ -526,7 +561,7 @@ struct Filmstrip: View {
     @ObservedObject private var library = Library.shared
 
     var body: some View {
-        let photos = library.photos(in: library.selection)
+        let photos = library.visiblePhotos()
         if photos.count > 1, model.currentPhotoID != nil {
             VStack(spacing: 0) {
                 Rectangle().fill(Color.rpMist).frame(height: 1)
@@ -543,6 +578,17 @@ struct Filmstrip: View {
                         }
                     }
                     .frame(width: 90, alignment: .leading)
+                    if let id = model.currentPhotoID {
+                        let flag = library.photo(id)?.flag
+                        VStack(spacing: 4) {
+                            IconButton(systemName: flag == .pick ? "flag.fill" : "flag", help: "Pick (P)") {
+                                model.flag(flag == .pick ? nil : .pick)
+                            }
+                            IconButton(systemName: flag == .reject ? "xmark.circle.fill" : "xmark.circle", help: "Reject (X)") {
+                                model.flag(flag == .reject ? nil : .reject)
+                            }
+                        }
+                    }
                     ScrollViewReader { proxy in
                         ScrollView(.horizontal, showsIndicators: false) {
                             LazyHStack(spacing: 6) {

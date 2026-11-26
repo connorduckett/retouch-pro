@@ -4,6 +4,23 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
+enum PhotoFlag: String, Codable {
+    case pick, reject
+}
+
+enum FlagFilter: String, CaseIterable, Identifiable {
+    case all = "All", picks = "Picks", unflagged = "Unflagged", rejected = "Rejected"
+    var id: String { rawValue }
+    func includes(_ flag: PhotoFlag?) -> Bool {
+        switch self {
+        case .all: return true
+        case .picks: return flag == .pick
+        case .unflagged: return flag == nil
+        case .rejected: return flag == .reject
+        }
+    }
+}
+
 struct LibraryPhoto: Codable, Identifiable, Equatable {
     var id = UUID()
     var path: String
@@ -12,6 +29,8 @@ struct LibraryPhoto: Codable, Identifiable, Equatable {
     /// Saved edits (nil = untouched). Edits are kept here, so the original file is never changed.
     var edits: EditState?
     var editedAt: Date?
+    /// Pick (flagged), Rejected, or nil for unflagged.
+    var flag: PhotoFlag?
 
     var name: String { (path as NSString).lastPathComponent }
     var isEdited: Bool { edits.map { !$0.isIdentity } ?? false }
@@ -33,6 +52,8 @@ struct Folder: Codable, Identifiable, Equatable {
 enum LibrarySelection: Hashable {
     case all
     case edited
+    case picks
+    case rejected
     case folder(UUID)
     case album(UUID)
 }
@@ -44,7 +65,13 @@ final class Library: ObservableObject {
 
     @Published private(set) var photos: [LibraryPhoto] = []
     @Published private(set) var folders: [Folder] = []
-    @Published var selection: LibrarySelection = .all
+    @Published var selection: LibrarySelection = .all {
+        didSet { if selection != oldValue { gridSelection = [] } }
+    }
+    /// Show only picks / unflagged / rejected within the current collection.
+    @Published var flagFilter: FlagFilter = .all
+    /// Photos selected in the grid.
+    @Published var gridSelection: Set<UUID> = []
     /// Bumped when a photo's thumbnail changes so grids reload it.
     @Published private(set) var thumbnailVersion: [UUID: Int] = [:]
 
@@ -68,8 +95,13 @@ final class Library: ObservableObject {
     // MARK: Persistence
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let stored = try? JSONDecoder().decode(Stored.self, from: data) else { return }
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        guard let stored = try? JSONDecoder().decode(Stored.self, from: data) else {
+            // Never overwrite a library we couldn't read: keep a copy so nothing is lost.
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            try? FileManager.default.copyItem(at: fileURL, to: directory.appendingPathComponent("Library-unreadable-\(stamp).json"))
+            return
+        }
         photos = stored.photos
         folders = stored.folders
     }
@@ -112,6 +144,10 @@ final class Library: ObservableObject {
             return photos.sorted { $0.added > $1.added }
         case .edited:
             return photos.filter(\.isEdited).sorted { ($0.editedAt ?? $0.added) > ($1.editedAt ?? $1.added) }
+        case .picks:
+            return photos.filter { $0.flag == .pick }.sorted { $0.added > $1.added }
+        case .rejected:
+            return photos.filter { $0.flag == .reject }.sorted { $0.added > $1.added }
         case .folder(let id):
             guard let f = folders.first(where: { $0.id == id }) else { return [] }
             var seen = Set<UUID>()
@@ -126,9 +162,25 @@ final class Library: ObservableObject {
         switch selection {
         case .all: return "All Photos"
         case .edited: return "Edited"
+        case .picks: return "Picks"
+        case .rejected: return "Rejected"
         case .folder(let id): return folders.first { $0.id == id }?.name ?? "Folder"
         case .album(let id): return album(id)?.name ?? "Album"
         }
+    }
+
+    /// The current collection with the Pick/Reject filter applied — what the grid and filmstrip show.
+    func visiblePhotos() -> [LibraryPhoto] {
+        photos(in: selection).filter { flagFilter.includes($0.flag) }
+    }
+
+    func setFlag(_ flag: PhotoFlag?, for ids: [UUID]) {
+        var changed = false
+        for i in photos.indices where ids.contains(photos[i].id) && photos[i].flag != flag {
+            photos[i].flag = flag
+            changed = true
+        }
+        if changed { setNeedsSave() }
     }
 
     /// The file for a photo, following it if it was moved or renamed in Finder.

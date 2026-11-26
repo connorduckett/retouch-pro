@@ -106,7 +106,8 @@ enum ImagePipeline {
     /// Builds the edited image. `source` may be a proxy or the full-resolution photo;
     /// every parameter is resolution-independent.
     static func render(source: CIImage, state: EditState, ignoreCrop: Bool = false,
-                       maskOverlayLayer: UUID? = nil) -> CIImage {
+                       maskOverlayLayer: UUID? = nil,
+                       maskOverlayColor: CIColor = CIColor(red: 0.95, green: 0.2, blue: 0.25)) -> CIImage {
         let sourceMax = max(source.extent.width, source.extent.height)
         var img = applyHeals(source, heals: state.heals, scale: sourceMax)
 
@@ -147,7 +148,7 @@ enum ImagePipeline {
         }
         if let id = maskOverlayLayer, let layer = state.layers.first(where: { $0.id == id }),
            let mask = LayerRenderer.mask(for: layer, ctx) {
-            img = LayerRenderer.maskOverlay(mask, over: img, extent: extent)
+            img = LayerRenderer.maskOverlay(mask, over: img, extent: extent, color: maskOverlayColor)
         }
         return img.cropped(to: extent)
     }
