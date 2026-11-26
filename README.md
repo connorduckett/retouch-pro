@@ -35,6 +35,7 @@ Other things:
 - **Before / After.** Press and hold the button, or press ⌘\ to toggle.
 - **Unlimited undo.** ⌘Z / ⇧⌘Z.
 - **Light or dark mode**, and default export settings, in **Settings** (⌘,).
+- **Built-in updates.** Settings ▸ Updates (or Retouch Pro ▸ Check for Updates…) checks GitHub; **Update Now** downloads the new version, installs it and restarts. No need to re-download or re-approve it manually.
 - **Signature Auto Enhance**: a bright, airy, warm look with soft blacks, tuned from a professional wedding & portrait portfolio. Switch to a neutral "Natural" style in Settings.
 - **Copy & paste edits** between photos (⇧⌘C, then open the next photo and press ⇧⌘V).
 - Drag a photo onto the window, or right-click a photo in Finder → **Open With → Retouch Pro**.

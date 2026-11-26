@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let saved = UserDefaults.standard.string(forKey: SettingsKey.appearance) ?? AppearanceMode.system.rawValue
         (AppearanceMode(rawValue: saved) ?? .system).apply()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { Updater.shared.checkOnLaunchIfNeeded() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -41,6 +42,9 @@ struct EditorCommands: Commands {
     @ObservedObject var model: EditorModel
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Check for Updates…") { Updater.shared.check(userInitiated: true) }
+        }
         CommandGroup(replacing: .newItem) {
             Button("Open Photo…") { model.presentOpenPanel() }
                 .keyboardShortcut("o")

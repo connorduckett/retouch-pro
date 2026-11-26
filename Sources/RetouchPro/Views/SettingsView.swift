@@ -44,6 +44,7 @@ struct SettingsView: View {
                 tabButton(0, "General", "gearshape")
                 tabButton(1, "Editing", "slider.horizontal.3")
                 tabButton(2, "Export", "square.and.arrow.up")
+                tabButton(3, "Updates", "arrow.down.circle")
             }
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity)
@@ -54,14 +55,15 @@ struct SettingsView: View {
                 switch tab {
                 case 0: general
                 case 1: editing
-                default: export
+                case 2: export
+                default: UpdatesSettings()
                 }
                 Spacer(minLength: 0)
             }
             .padding(22)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(width: 520, height: 400)
+        .frame(width: 560, height: 420)
         .background(Color.rpCard)
     }
 
@@ -175,5 +177,113 @@ struct SettingsView: View {
             .fixedSize(horizontal: false, vertical: true)
             .padding(.leading, 114)
             .padding(.top, -10)
+    }
+}
+
+struct UpdatesSettings: View {
+    @ObservedObject private var updater = Updater.shared
+    @AppStorage(Updater.autoCheckKey) private var autoCheck = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 14) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .frame(width: 56, height: 56)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Retouch Pro \(updater.currentVersion)")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.rpInk)
+                    Text(lastCheckedText)
+                        .font(.system(size: 11))
+                        .foregroundColor(.rpSlate)
+                }
+            }
+
+            statusView
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.rpPaper))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.rpMist))
+
+            Toggle("Check for updates automatically", isOn: $autoCheck)
+                .font(.system(size: 12))
+                .foregroundColor(.rpInk)
+        }
+    }
+
+    private var lastCheckedText: String {
+        guard let d = updater.lastChecked else { return "Not checked yet" }
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        return "Last checked \(f.localizedString(for: d, relativeTo: Date()))"
+    }
+
+    @ViewBuilder
+    private var statusView: some View {
+        switch updater.status {
+        case .idle, .failed:
+            VStack(alignment: .leading, spacing: 10) {
+                if case .failed(let message) = updater.status {
+                    Text(message).font(.system(size: 12)).foregroundColor(.red)
+                }
+                Button {
+                    updater.check(userInitiated: true, alert: false)
+                } label: {
+                    Label("Check for Updates", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(RPButtonStyle(kind: .primary))
+            }
+        case .checking:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Checking GitHub for a new version…").font(.system(size: 12)).foregroundColor(.rpInk)
+            }
+        case .upToDate:
+            VStack(alignment: .leading, spacing: 10) {
+                Label("You’re up to date.", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.rpInk)
+                Button("Check Again") { updater.check(userInitiated: true, alert: false) }
+                    .buttonStyle(RPButtonStyle())
+            }
+        case .available(let release):
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Version \(release.version) is available", systemImage: "arrow.down.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.rpInk)
+                if !release.notes.isEmpty {
+                    ScrollView {
+                        Text(release.notes)
+                            .font(.system(size: 11))
+                            .foregroundColor(.rpCharcoal)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxHeight: 90)
+                }
+                HStack(spacing: 8) {
+                    Button {
+                        updater.downloadAndInstall(release)
+                    } label: {
+                        Label("Update Now", systemImage: "arrow.down.to.line")
+                    }
+                    .buttonStyle(RPButtonStyle(kind: .primary))
+                    .help("Downloads the new version, installs it and restarts Retouch Pro")
+                    Button("View on GitHub") { updater.openReleasePage(release) }
+                        .buttonStyle(RPButtonStyle())
+                }
+            }
+        case .downloading:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Downloading the update…").font(.system(size: 12)).foregroundColor(.rpInk)
+            }
+        case .installing:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Installing — Retouch Pro will restart…").font(.system(size: 12)).foregroundColor(.rpInk)
+            }
+        }
     }
 }

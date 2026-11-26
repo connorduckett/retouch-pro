@@ -151,6 +151,17 @@ final class EditorModel: ObservableObject {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    /// Asks before restarting for an update when there are unexported edits.
+    func confirmQuitForUpdate() -> Bool {
+        guard hasImage, hasUnexportedChanges else { return true }
+        let alert = NSAlert()
+        alert.messageText = "Restart to update?"
+        alert.informativeText = "Retouch Pro will close to install the update. Your edits to “\(fileName)” haven’t been exported and will be lost."
+        alert.addButton(withTitle: "Update Anyway")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     func close() {
         guard confirmDiscardIfNeeded() else { return }
         loadToken = UUID()
