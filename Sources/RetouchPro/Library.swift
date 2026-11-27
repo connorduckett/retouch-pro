@@ -45,6 +45,9 @@ struct Album: Codable, Identifiable, Equatable {
     var id = UUID()
     var name: String
     var photoIDs: [UUID] = []
+    /// The whole shoot kept next to its category albums (e.g. "All Photos" after culling). It's not a
+    /// category: sorting photos into categories never takes them out of it.
+    var holdsEverything: Bool?
 }
 
 struct Folder: Codable, Identifiable, Equatable {
@@ -52,6 +55,11 @@ struct Folder: Codable, Identifiable, Equatable {
     var name: String
     var albums: [Album] = []
     var expanded = true
+    /// The folder this one sits inside (nil = top level). Folders can nest as deep as you like.
+    var parentID: UUID?
+
+    /// Albums you sort photos between (keys 1–9, Move to).
+    var categoryAlbums: [Album] { albums.filter { $0.holdsEverything != true } }
 }
 
 enum LibrarySelection: Hashable {
@@ -148,6 +156,42 @@ final class Library: ObservableObject {
         folders.first { $0.albums.contains { $0.id == id } }
     }
 
+    func folder(_ id: UUID) -> Folder? { folders.first { $0.id == id } }
+
+    /// Folders directly inside `parent` (nil = top level), in the order they were made.
+    func subfolders(of parent: UUID?) -> [Folder] {
+        folders.filter { $0.parentID == parent }
+    }
+
+    /// A folder and every folder inside it, at any depth.
+    func folderAndDescendants(_ id: UUID) -> [UUID] {
+        var result = [id], i = 0
+        while i < result.count {
+            result += folders.filter { $0.parentID == result[i] }.map(\.id)
+            i += 1
+        }
+        return result
+    }
+
+    /// "Weddings ▸ Elise and Jaden" — for menus and pickers.
+    func path(ofFolder id: UUID) -> String {
+        var names: [String] = [], cur: UUID? = id, guardCount = 0
+        while let c = cur, let f = folder(c), guardCount < 64 {
+            names.insert(f.name, at: 0); cur = f.parentID; guardCount += 1
+        }
+        return names.joined(separator: " ▸ ")
+    }
+
+    /// Every folder in sidebar order with its depth (for pickers).
+    func folderOutline() -> [(folder: Folder, depth: Int)] {
+        var out: [(Folder, Int)] = []
+        func walk(_ parent: UUID?, _ depth: Int) {
+            for f in subfolders(of: parent) { out.append((f, depth)); walk(f.id, depth + 1) }
+        }
+        walk(nil, 0)
+        return out
+    }
+
     func photos(in selection: LibrarySelection) -> [LibraryPhoto] {
         switch selection {
         case .all:
@@ -161,9 +205,11 @@ final class Library: ObservableObject {
         case .needsReview:
             return photos.filter(\.hasDefects).sorted { $0.added > $1.added }
         case .folder(let id):
-            guard let f = folders.first(where: { $0.id == id }) else { return [] }
+            guard folder(id) != nil else { return [] }
+            let tree = Set(folderAndDescendants(id))
             var seen = Set<UUID>()
-            let ids = f.albums.flatMap(\.photoIDs).filter { seen.insert($0).inserted }
+            let ids = folders.filter { tree.contains($0.id) }.flatMap { $0.albums.flatMap(\.photoIDs) }
+                .filter { seen.insert($0).inserted }
             return ids.compactMap(photo)
         case .album(let id):
             return album(id)?.photoIDs.compactMap(photo) ?? []
@@ -288,9 +334,12 @@ final class Library: ObservableObject {
     // MARK: Folders & albums
 
     @discardableResult
-    func createFolder(named name: String = "New Folder") -> UUID {
-        let f = Folder(name: uniqueName(name, existing: folders.map(\.name)))
+    func createFolder(named name: String = "New Folder", inFolder parent: UUID? = nil) -> UUID {
+        let parent = parent.flatMap { folder($0) != nil ? $0 : nil }
+        var f = Folder(name: uniqueName(name, existing: subfolders(of: parent).map(\.name)))
+        f.parentID = parent
         folders.append(f)
+        if let parent, let pi = folders.firstIndex(where: { $0.id == parent }) { folders[pi].expanded = true }
         setNeedsSave()
         return f.id
     }
@@ -330,10 +379,12 @@ final class Library: ObservableObject {
         setNeedsSave()
     }
 
-    /// Deleting a folder or album never deletes photos — they stay in All Photos.
+    /// Deleting a folder (with the folders and albums inside it) or an album never deletes photos —
+    /// they stay in All Photos.
     func delete(folder id: UUID) {
-        folders.removeAll { $0.id == id }
-        if case .folder(let s) = selection, s == id { selection = .all }
+        let tree = Set(folderAndDescendants(id))
+        folders.removeAll { tree.contains($0.id) }
+        if case .folder(let s) = selection, tree.contains(s) { selection = .all }
         if case .album(let a) = selection, album(a) == nil { selection = .all }
         setNeedsSave()
     }
@@ -344,8 +395,25 @@ final class Library: ObservableObject {
         setNeedsSave()
     }
 
+    /// Can `id` be moved into `parent`? (Not into itself or a folder inside it.)
+    func canMove(folder id: UUID, into parent: UUID?) -> Bool {
+        guard let parent else { return true }
+        return !folderAndDescendants(id).contains(parent)
+    }
+
+    /// Moves a folder (with everything in it) inside another folder, or to the top level.
+    func moveFolder(_ id: UUID, into parent: UUID?) {
+        guard let i = folders.firstIndex(where: { $0.id == id }), canMove(folder: id, into: parent),
+              folders[i].parentID != parent else { return }
+        folders[i].name = uniqueName(folders[i].name, existing: subfolders(of: parent).map(\.name))
+        folders[i].parentID = parent
+        if let parent, let pi = folders.firstIndex(where: { $0.id == parent }) { folders[pi].expanded = true }
+        setNeedsSave()
+    }
+
     func moveAlbum(_ id: UUID, toFolder folderID: UUID) {
-        guard let album = album(id), let target = folders.firstIndex(where: { $0.id == folderID }) else { return }
+        guard let album = album(id), let target = folders.firstIndex(where: { $0.id == folderID }),
+              !folders[target].albums.contains(where: { $0.id == id }) else { return }
         for fi in folders.indices { folders[fi].albums.removeAll { $0.id == id } }
         folders[target].albums.append(album)
         setNeedsSave()
@@ -386,17 +454,25 @@ final class Library: ObservableObject {
     /// Moves photos into a category album: they leave the album being viewed (or every album of the
     /// folder being viewed) so each photo ends up in exactly one category.
     func sort(_ ids: [UUID], into albumID: UUID) {
-        switch selection {
-        case .album(let current) where current != albumID:
+        if case .album(let current) = selection, current != albumID, album(current)?.holdsEverything != true,
+           folder(containingAlbum: current)?.id != folder(containingAlbum: albumID)?.id {
             remove(ids, fromAlbum: current)
-        case .folder(let folderID):
-            if let f = folders.first(where: { $0.id == folderID }) {
-                for a in f.albums where a.id != albumID { remove(ids, fromAlbum: a.id) }
-            }
-        default:
-            break
+        }
+        // Each photo belongs to one category: take it out of the target's sibling categories.
+        if let f = folder(containingAlbum: albumID) {
+            for a in f.categoryAlbums where a.id != albumID { remove(ids, fromAlbum: a.id) }
         }
         add(ids, toAlbum: albumID)
+    }
+
+    func setHoldsEverything(_ albumID: UUID, _ value: Bool) {
+        for fi in folders.indices {
+            if let ai = folders[fi].albums.firstIndex(where: { $0.id == albumID }) {
+                folders[fi].albums[ai].holdsEverything = value ? true : nil
+                setNeedsSave()
+                return
+            }
+        }
     }
 
     /// Moves photos from one album to another (used by drag and drop).

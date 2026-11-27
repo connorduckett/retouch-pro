@@ -21,6 +21,20 @@ final class CullingSession: ObservableObject {
     @Published var pickBest = true
     @Published var rejectProblems = false
 
+    enum OriginalAlbumHandling: String, CaseIterable, Identifiable {
+        case moveIn = "Move it into the new folder, renamed “All Photos”"
+        case keep = "Leave it where it is"
+        case delete = "Delete the album (the photos stay in your library)"
+        var id: String { rawValue }
+    }
+    /// Where the category albums go: inside this folder (nil = top level)…
+    @Published var destinationParent: UUID?
+    /// …in a new folder named `shootName` (otherwise straight into `destinationParent`).
+    @Published var makeNewFolder = true
+    /// The album being culled, if the shoot came from one.
+    @Published var sourceAlbumID: UUID?
+    @Published var originalAlbum: OriginalAlbumHandling = .moveIn
+
     @Published var progress = 0
     @Published var categories: [CullingCategories.Category] = []
     @Published var analyses: [UUID: PhotoAnalysis] = [:]
@@ -43,8 +57,32 @@ final class CullingSession: ObservableObject {
         } else {
             photoIDs = lib.visiblePhotos().map(\.id)
             sourceName = lib.title(for: lib.selection)
+            if case .album(let id) = lib.selection { sourceAlbumID = id }
         }
-        shootName = defaultName()
+        // Put the categories next to what's being culled: culling the album "Elise and Jaden" in
+        // "Weddings" makes Weddings ▸ Elise and Jaden ▸ Getting Ready, Ceremony…
+        switch lib.selection {
+        case .album(let id):
+            destinationParent = lib.folder(containingAlbum: id)?.id
+        case .folder(let id):
+            destinationParent = id
+        default:
+            destinationParent = nil
+        }
+        if let id = sourceAlbumID, let album = lib.album(id) {
+            shootName = album.name
+        } else {
+            shootName = defaultName()
+        }
+    }
+
+    /// Where the albums will end up, e.g. "Weddings ▸ Elise and Jaden".
+    var destinationDescription: String {
+        let lib = Library.shared
+        let parent = destinationParent.map(lib.path(ofFolder:))
+        let name = shootName.trimmingCharacters(in: .whitespaces).isEmpty ? defaultName() : shootName
+        if makeNewFolder { return [parent, name].compactMap { $0 }.joined(separator: " ▸ ") }
+        return parent ?? name
     }
 
     func defaultName() -> String {
@@ -58,6 +96,7 @@ final class CullingSession: ObservableObject {
         guard !ids.isEmpty else { return }
         photoIDs = ids
         sourceName = "\(ids.count) imported photos"
+        sourceAlbumID = nil
     }
 
     // MARK: Analysis
@@ -219,10 +258,18 @@ final class CullingSession: ObservableObject {
 
     // MARK: Apply
 
-    /// Creates a folder with one album per category, tags problems and (optionally) flags photos.
+    /// Creates one album per category (in a new folder, or an existing one), tags problems and
+    /// (optionally) flags photos.
     func apply() -> UUID {
         let lib = Library.shared
-        let folder = lib.createFolder(named: shootName.trimmingCharacters(in: .whitespaces).isEmpty ? defaultName() : shootName)
+        let name = shootName.trimmingCharacters(in: .whitespaces).isEmpty ? defaultName() : shootName
+        let parent = destinationParent.flatMap { lib.folder($0) != nil ? $0 : nil }
+        let folder: UUID
+        if makeNewFolder || parent == nil {
+            folder = lib.createFolder(named: name, inFolder: parent)
+        } else {
+            folder = parent!
+        }
         let problems = Set(problemIDs)
         for c in categories where !c.photoIDs.isEmpty {
             let ids = issueHandling == .separate ? c.photoIDs.filter { !problems.contains($0) } : c.photoIDs
@@ -231,6 +278,20 @@ final class CullingSession: ObservableObject {
         if issueHandling == .separate, !problems.isEmpty {
             let ordered = categories.flatMap(\.photoIDs).filter(problems.contains)
             lib.createAlbum(named: "Needs Review", inFolder: folder, photoIDs: ordered)
+        }
+        // The album that was culled: tuck it into the new folder (after the categories, so they keep
+        // keys 1–9), leave it, or remove it.
+        if let source = sourceAlbumID, lib.album(source) != nil {
+            switch originalAlbum {
+            case .moveIn where makeNewFolder || parent == nil:
+                if lib.folder(containingAlbum: source)?.id != folder { lib.moveAlbum(source, toFolder: folder) }
+                lib.rename(album: source, to: "All Photos")
+                lib.setHoldsEverything(source, true)
+            case .delete:
+                lib.delete(album: source)
+            default:
+                break
+            }
         }
         lib.setIssues(analyses.mapValues { Array($0.issues).sorted { $0.rawValue < $1.rawValue } })
         if pickBest {
@@ -400,10 +461,48 @@ private struct SetupStep: View {
                     Text(categoryPreview)
                         .font(.system(size: 11)).foregroundColor(.rpSlate)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+
+                group("Where should the albums go?") {
                     HStack {
-                        Text("Folder name").font(.system(size: 12)).frame(width: 90, alignment: .leading)
-                        TextField("Shoot name", text: $session.shootName).textFieldStyle(.roundedBorder)
+                        Text("Inside").font(.system(size: 12)).frame(width: 90, alignment: .leading)
+                        Picker("", selection: $session.destinationParent) {
+                            Text("Top level (no folder)").tag(UUID?.none)
+                            Divider()
+                            ForEach(Library.shared.folderOutline(), id: \.folder.id) { item in
+                                Text(String(repeating: "    ", count: item.depth) + item.folder.name).tag(UUID?.some(item.folder.id))
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 300)
+                        .onChange(of: session.destinationParent) { p in if p == nil { session.makeNewFolder = true } }
                     }
+                    HStack {
+                        Toggle("Make a new folder named", isOn: $session.makeNewFolder)
+                            .font(.system(size: 12))
+                            .disabled(session.destinationParent == nil)
+                            .padding(.leading, 94)
+                        TextField("Shoot name", text: $session.shootName)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(!session.makeNewFolder)
+                    }
+                    if let source = session.sourceAlbumID, let album = Library.shared.album(source) {
+                        HStack(alignment: .top) {
+                            Text("“\(album.name)”").font(.system(size: 12)).lineLimit(2)
+                                .frame(width: 90, alignment: .leading)
+                                .help("The album you're culling (\(album.photoIDs.count) photos)")
+                            Picker("", selection: $session.originalAlbum) {
+                                ForEach(CullingSession.OriginalAlbumHandling.allCases) { option in
+                                    Text(option.rawValue).tag(option)
+                                        .disabled(option == .moveIn && !session.makeNewFolder)
+                                }
+                            }
+                            .pickerStyle(.radioGroup)
+                            .labelsHidden()
+                        }
+                    }
+                    Label("Albums will be created in \(session.destinationDescription)", systemImage: "folder")
+                        .font(.system(size: 11)).foregroundColor(.rpSlate)
                 }
 
                 group("Look for problems") {

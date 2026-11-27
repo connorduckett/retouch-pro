@@ -25,6 +25,8 @@ private struct LibrarySidebar: View {
     @ObservedObject private var library = Library.shared
     @State private var renaming: UUID?
     @State private var draft = ""
+    @State private var dropTarget: UUID?
+    @State private var topLevelTargeted = false
 
     var body: some View {
         ScrollView {
@@ -52,6 +54,9 @@ private struct LibrarySidebar: View {
                     Spacer()
                     Menu {
                         Button("New Folder") { startRename(library.createFolder()) }
+                        if let f = selectedFolderID.flatMap({ library.folder($0) }) {
+                            Button("New Folder Inside “\(f.name)”") { startRename(library.createFolder(inFolder: f.id)) }
+                        }
                         Button("New Album") { newAlbum(in: selectedFolderID) }
                             .disabled(library.folders.isEmpty)
                     } label: {
@@ -65,6 +70,11 @@ private struct LibrarySidebar: View {
                     .help("New folder or album")
                     .padding(.trailing, 10)
                     .padding(.top, 14)
+                }
+                .background(RoundedRectangle(cornerRadius: 7).stroke(Color.rpAccent, lineWidth: topLevelTargeted ? 2 : 0))
+                .onDrop(of: [.plainText], isTargeted: $topLevelTargeted) { providers in
+                    // Dropping a folder on the "Folders" header moves it back to the top level.
+                    dropAtTopLevel(providers)
                 }
 
                 if library.folders.isEmpty {
@@ -84,30 +94,53 @@ private struct LibrarySidebar: View {
                     .padding(.top, 4)
                 }
 
-                ForEach(library.folders) { folder in
-                    folderRow(folder)
-                    if folder.expanded {
-                        ForEach(folder.albums) { album in
-                            albumRow(album, in: folder)
-                        }
-                        Button {
-                            newAlbum(in: folder.id)
-                        } label: {
-                            Label("New Album", systemImage: "plus")
-                                .font(.system(size: 11))
-                                .foregroundColor(.rpSlate)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.leading, 40)
-                        .padding(.vertical, 3)
-                    }
-                }
+                folderTree(nil, depth: 0)
             }
             .padding(.vertical, 10)
             .padding(.horizontal, 8)
         }
         .background(Color.rpPaper)
     }
+
+    /// The folders inside `parent`, each followed (when open) by its subfolders and albums.
+    private func folderTree(_ parent: UUID?, depth: Int) -> AnyView {
+        AnyView(ForEach(library.subfolders(of: parent)) { folder in
+            folderRow(folder, depth: depth)
+            if folder.expanded {
+                folderTree(folder.id, depth: depth + 1)
+                ForEach(folder.albums) { album in
+                    albumRow(album, in: folder, depth: depth)
+                }
+                Button {
+                    newAlbum(in: folder.id)
+                } label: {
+                    Label("New Album", systemImage: "plus")
+                        .font(.system(size: 11))
+                        .foregroundColor(.rpSlate)
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 40 + indent(depth))
+                .padding(.vertical, 3)
+            }
+        })
+    }
+
+    private func dropAtTopLevel(_ providers: [NSItemProvider]) -> Bool {
+        SidebarDrag.load(providers) { (item: SidebarDrag.Item) in
+            if case .folder(let id) = item { library.moveFolder(id, into: nil) }
+        }
+    }
+
+    private func dropIntoFolder(_ providers: [NSItemProvider], _ folder: UUID) -> Bool {
+        SidebarDrag.load(providers) { (item: SidebarDrag.Item) in
+            switch item {
+            case .folder(let id): if id != folder { library.moveFolder(id, into: folder) }
+            case .album(let id): library.moveAlbum(id, toFolder: folder)
+            }
+        }
+    }
+
+    private func indent(_ depth: Int) -> CGFloat { CGFloat(min(depth, 6)) * 14 }
 
     private var selectedFolderID: UUID? {
         switch library.selection {
@@ -124,7 +157,7 @@ private struct LibrarySidebar: View {
     }
 
     private func startRename(_ id: UUID) {
-        draft = library.folders.first { $0.id == id }?.name ?? library.album(id)?.name ?? ""
+        draft = library.folder(id)?.name ?? library.album(id)?.name ?? ""
         renaming = id
     }
 
@@ -160,8 +193,9 @@ private struct LibrarySidebar: View {
         .onTapGesture { library.selection = selection }
     }
 
-    private func folderRow(_ folder: Folder) -> some View {
+    private func folderRow(_ folder: Folder, depth: Int) -> some View {
         let selected = library.selection == .folder(folder.id)
+        let targeted = dropTarget == folder.id
         return HStack(spacing: 6) {
             Button {
                 library.setExpanded(folder.id, !folder.expanded)
@@ -181,29 +215,49 @@ private struct LibrarySidebar: View {
                 Text(folder.name).lineLimit(1)
             }
             Spacer()
-            Text("\(folder.albums.count)").font(.system(size: 11).monospacedDigit()).opacity(0.7)
+            Text("\(folder.albums.count + library.subfolders(of: folder.id).count)")
+                .font(.system(size: 11).monospacedDigit()).opacity(0.7)
         }
         .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
         .foregroundColor(selected ? .white : .rpInk)
-        .padding(.horizontal, 6)
+        .padding(.leading, 6 + indent(depth))
+        .padding(.trailing, 6)
         .frame(height: 28)
         .background(RoundedRectangle(cornerRadius: 7).fill(selected ? Color.rpAccent : .clear))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.rpAccent, lineWidth: targeted ? 2 : 0))
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { startRename(folder.id) }
         .onTapGesture { library.selection = .folder(folder.id) }
+        .onDrag { NSItemProvider(object: SidebarDrag.encode(.folder(folder.id)) as NSString) }
+        .onDrop(of: [.plainText], isTargeted: Binding(
+            get: { dropTarget == folder.id },
+            set: { on in if on { dropTarget = folder.id } else if dropTarget == folder.id { dropTarget = nil } })) { providers in
+            // Drop a folder or album here to put it inside this folder.
+            dropIntoFolder(providers, folder.id)
+        }
         .contextMenu {
             Button("New Album in “\(folder.name)”") { newAlbum(in: folder.id) }
+            Button("New Folder Inside “\(folder.name)”") { startRename(library.createFolder(inFolder: folder.id)) }
             Button("Rename…") { startRename(folder.id) }
+            Menu("Move to") {
+                Button("Top Level") { library.moveFolder(folder.id, into: nil) }
+                    .disabled(folder.parentID == nil)
+                Divider()
+                ForEach(library.folderOutline().filter { library.canMove(folder: folder.id, into: $0.folder.id) }, id: \.folder.id) { item in
+                    Button(library.path(ofFolder: item.folder.id)) { library.moveFolder(folder.id, into: item.folder.id) }
+                        .disabled(folder.parentID == item.folder.id)
+                }
+            }
             Divider()
             Button("Delete Folder") { confirmDelete(folder: folder) }
         }
     }
 
-    private func albumRow(_ album: Album, in folder: Folder) -> some View {
+    private func albumRow(_ album: Album, in folder: Folder, depth: Int) -> some View {
         let selected = library.selection == .album(album.id)
         return AlbumDropRow(album: album) {
             HStack(spacing: 8) {
-                Image(systemName: "rectangle.stack").frame(width: 18)
+                Image(systemName: album.holdsEverything == true ? "photo.stack" : "rectangle.stack").frame(width: 18)
                 if renaming == album.id {
                     TextField("Album name", text: $draft, onCommit: { finishRename(album.id, folder: false) })
                         .textFieldStyle(.roundedBorder)
@@ -212,7 +266,7 @@ private struct LibrarySidebar: View {
                     Text(album.name).lineLimit(1)
                 }
                 Spacer()
-                if library.sortingFolder?.id == folder.id, let n = folder.albums.firstIndex(where: { $0.id == album.id }), n < 9 {
+                if library.sortingFolder?.id == folder.id, let n = folder.categoryAlbums.firstIndex(where: { $0.id == album.id }), n < 9 {
                     Text("\(n + 1)")
                         .font(.system(size: 9.5, weight: .bold, design: .rounded))
                         .foregroundColor(selected ? .rpAccent : .rpCharcoal)
@@ -224,7 +278,7 @@ private struct LibrarySidebar: View {
             }
             .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
             .foregroundColor(selected ? .white : .rpInk)
-            .padding(.leading, 30)
+            .padding(.leading, 30 + indent(depth))
             .padding(.trailing, 10)
             .frame(height: 28)
             .background(RoundedRectangle(cornerRadius: 7).fill(selected ? Color.rpAccent : .clear))
@@ -232,11 +286,13 @@ private struct LibrarySidebar: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { startRename(album.id) }
         .onTapGesture { library.selection = .album(album.id) }
+        .onDrag { NSItemProvider(object: SidebarDrag.encode(.album(album.id)) as NSString) }
         .contextMenu {
             Button("Rename…") { startRename(album.id) }
             Menu("Move to Folder") {
-                ForEach(library.folders.filter { $0.id != folder.id }) { f in
-                    Button(f.name) { library.moveAlbum(album.id, toFolder: f.id) }
+                ForEach(library.folderOutline(), id: \.folder.id) { item in
+                    Button(library.path(ofFolder: item.folder.id)) { library.moveAlbum(album.id, toFolder: item.folder.id) }
+                        .disabled(item.folder.id == folder.id)
                 }
             }
             Divider()
@@ -247,7 +303,14 @@ private struct LibrarySidebar: View {
     private func confirmDelete(folder: Folder) {
         let alert = NSAlert()
         alert.messageText = "Delete the folder “\(folder.name)”?"
-        alert.informativeText = "Its \(folder.albums.count) album\(folder.albums.count == 1 ? "" : "s") will be deleted too. Your photos stay in All Photos, and nothing is removed from your Mac."
+        let tree = library.folderAndDescendants(folder.id)
+        let subs = tree.count - 1
+        let albums = tree.compactMap { library.folder($0) }.reduce(0) { $0 + $1.albums.count }
+        var inside: [String] = []
+        if subs > 0 { inside.append("\(subs) folder\(subs == 1 ? "" : "s")") }
+        if albums > 0 { inside.append("\(albums) album\(albums == 1 ? "" : "s")") }
+        alert.informativeText = (inside.isEmpty ? "" : "The \(inside.joined(separator: " and ")) inside it will be deleted too. ")
+            + "Your photos stay in All Photos, and nothing is removed from your Mac."
         alert.addButton(withTitle: "Delete Folder")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn { library.delete(folder: folder.id) }
@@ -277,7 +340,7 @@ private struct AlbumDropRow<Content: View>: View {
                     // Dragging from one album to another moves the photos; hold ⌥ to add a copy instead.
                     let copy = NSEvent.modifierFlags.contains(.option)
                     _ = p.loadObject(ofClass: NSString.self) { obj, _ in
-                        guard let text = obj as? String else { return }
+                        guard let text = obj as? String, !SidebarDrag.isSidebarItem(text) else { return }
                         let (ids, source) = PhotoDrag.decode(text)
                         DispatchQueue.main.async {
                             if let source, !copy { Library.shared.move(ids, fromAlbum: source, toAlbum: album.id) }
@@ -290,6 +353,34 @@ private struct AlbumDropRow<Content: View>: View {
                     Library.shared.importPhotos(urls, intoAlbum: album.id)
                 }
             }
+    }
+}
+
+/// Dragging folders and albums around the sidebar.
+enum SidebarDrag {
+    enum Item { case folder(UUID), album(UUID) }
+    static func encode(_ item: Item) -> String {
+        switch item {
+        case .folder(let id): return "retouchpro-folder:" + id.uuidString
+        case .album(let id): return "retouchpro-album:" + id.uuidString
+        }
+    }
+    static func isSidebarItem(_ text: String) -> Bool {
+        text.hasPrefix("retouchpro-folder:") || text.hasPrefix("retouchpro-album:")
+    }
+    static func decode(_ text: String) -> Item? {
+        if text.hasPrefix("retouchpro-folder:") { return UUID(uuidString: String(text.dropFirst(18))).map(Item.folder) }
+        if text.hasPrefix("retouchpro-album:") { return UUID(uuidString: String(text.dropFirst(17))).map(Item.album) }
+        return nil
+    }
+    /// Reads a dragged folder/album and hands it over on the main thread. Returns false for anything else.
+    static func load(_ providers: [NSItemProvider], _ handle: @escaping (Item) -> Void) -> Bool {
+        guard let p = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) }) else { return false }
+        _ = p.loadObject(ofClass: NSString.self) { obj, _ in
+            guard let text = obj as? String, let item = decode(text) else { return }
+            DispatchQueue.main.async { handle(item) }
+        }
+        return true
     }
 }
 
@@ -455,7 +546,7 @@ private struct PhotoGrid: View {
     /// Category albums of the current folder, numbered to match the 1–9 shortcuts.
     @ViewBuilder
     private func moveMenu(_ ids: [UUID], folder: Folder) -> some View {
-        ForEach(Array(folder.albums.enumerated()), id: \.element.id) { index, album in
+        ForEach(Array(folder.categoryAlbums.enumerated()), id: \.element.id) { index, album in
             Button(index < 9 ? "\(album.name)    \(index + 1)" : album.name) {
                 model.sortPhotos(ids, into: album.id)
             }
@@ -471,8 +562,20 @@ private struct PhotoGrid: View {
 
     @ViewBuilder
     private func albumMenu(_ ids: [UUID]) -> some View {
-        ForEach(library.folders) { folder in
+        folderMenus(ids, parent: nil)
+        if !library.folders.isEmpty { Divider() }
+        Button("New Album…") {
+            let id = library.createAlbum(inFolder: nil, photoIDs: ids)
+            library.selection = .album(id)
+        }
+    }
+
+    /// One submenu per folder, with its subfolders nested inside.
+    private func folderMenus(_ ids: [UUID], parent: UUID?) -> AnyView {
+        AnyView(ForEach(library.subfolders(of: parent)) { folder in
             Menu(folder.name) {
+                folderMenus(ids, parent: folder.id)
+                if !library.subfolders(of: folder.id).isEmpty && !folder.albums.isEmpty { Divider() }
                 ForEach(folder.albums) { album in
                     Button(album.name) { library.add(ids, toAlbum: album.id) }
                 }
@@ -482,12 +585,7 @@ private struct PhotoGrid: View {
                     library.selection = .album(id)
                 }
             }
-        }
-        if !library.folders.isEmpty { Divider() }
-        Button("New Album…") {
-            let id = library.createAlbum(inFolder: nil, photoIDs: ids)
-            library.selection = .album(id)
-        }
+        })
     }
 
     @ViewBuilder

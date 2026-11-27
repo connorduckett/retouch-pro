@@ -384,8 +384,8 @@ final class EditorModel: ObservableObject {
     /// 1–9: send the selected photos (or the photo being edited) to that category album.
     func sortSelected(intoAlbumNumber n: Int) -> Bool {
         let lib = Library.shared
-        guard let folder = lib.sortingFolder, n >= 1, n <= folder.albums.count else { return false }
-        let target = folder.albums[n - 1].id
+        guard let folder = lib.sortingFolder, n >= 1, n <= folder.categoryAlbums.count else { return false }
+        let target = folder.categoryAlbums[n - 1].id
         let ids: [UUID]
         if mode == .library {
             ids = lib.visiblePhotos().map(\.id).filter(lib.gridSelection.contains)
