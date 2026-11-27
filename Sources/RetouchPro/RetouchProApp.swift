@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeyboardShortcuts.install()
         let saved = UserDefaults.standard.string(forKey: SettingsKey.appearance) ?? AppearanceMode.system.rawValue
         (AppearanceMode(rawValue: saved) ?? .system).apply()
+        DispatchQueue.global(qos: .utility).async { Updater.shared.cleanUpOldDownloads() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { Updater.shared.checkOnLaunchIfNeeded() }
     }
 

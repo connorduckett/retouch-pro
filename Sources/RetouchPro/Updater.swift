@@ -37,6 +37,15 @@ final class Updater: ObservableObject {
     // MARK: Checking
 
     /// Checks automatically at most once a day, if the user hasn't turned it off.
+    /// Removes leftover download folders from earlier updates.
+    func cleanUpOldDownloads() {
+        let tmp = FileManager.default.temporaryDirectory
+        let items = (try? FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)) ?? []
+        for item in items where item.lastPathComponent.hasPrefix("RetouchProUpdate-") {
+            try? FileManager.default.removeItem(at: item)
+        }
+    }
+
     func checkOnLaunchIfNeeded() {
         let d = UserDefaults.standard
         if d.object(forKey: Self.autoCheckKey) != nil && !d.bool(forKey: Self.autoCheckKey) { return }
@@ -192,14 +201,28 @@ final class Updater: ObservableObject {
         mv "$TARGET" "$TARGET.old" && mv "$NEWAPP" "$TARGET" && rm -rf "$TARGET.old" || mv "$TARGET.old" "$TARGET"
         xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null
         open "$TARGET"
+        rm -rf "$WORKDIR"
         """
         let helper = Process()
         helper.executableURL = URL(fileURLWithPath: "/bin/sh")
         helper.arguments = ["-c", script]
-        helper.environment = ["TARGET": current.path, "NEWAPP": newApp.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
+        helper.environment = ["TARGET": current.path, "NEWAPP": newApp.path,
+                              "WORKDIR": newApp.deletingLastPathComponent().path,
+                              "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
         do {
             try helper.run()
+            EditorModel.shared.flushEdits()
+            Library.shared.saveNow()
+            // Close every window first: an open sheet or panel can make AppKit ignore terminate.
+            for window in NSApp.windows { window.sheets.forEach { window.endSheet($0) } }
             NSApp.terminate(nil)
+            // If something still blocked quitting, make sure everything is saved and exit anyway —
+            // otherwise the installer would wait forever.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                EditorModel.shared.flushEdits()
+                Library.shared.saveNow()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { exit(0) }
+            }
         } catch {
             status = .failed(Self.friendly(error))
             simpleAlert("Update failed", Self.friendly(error))

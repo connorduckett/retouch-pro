@@ -442,7 +442,8 @@ final class EditorModel: ObservableObject {
 
     /// Asks before restarting for an update when there are unexported edits.
     func confirmQuitForUpdate() -> Bool {
-        guard hasImage, hasUnexportedChanges else { return true }
+        // Library photos save their edits automatically, so only loose files need a warning.
+        guard hasImage, hasUnexportedChanges, currentPhotoID == nil else { return true }
         let alert = NSAlert()
         alert.messageText = "Restart to update?"
         alert.informativeText = "Retouch Pro will close to install the update. Your edits to “\(fileName)” haven’t been exported and will be lost."
