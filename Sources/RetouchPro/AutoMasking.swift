@@ -100,6 +100,8 @@ final class AutoMasker {
             let request = VNGeneratePersonSegmentationRequest()
             request.qualityLevel = .accurate
             request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+            CullingEngine.visionLock.lock()
+            defer { CullingEngine.visionLock.unlock() }
             let handler = VNImageRequestHandler(cgImage: image, options: [:])
             if (try? handler.perform([request])) != nil,
                let buffer = request.results?.first?.pixelBuffer,
@@ -124,6 +126,8 @@ final class AutoMasker {
 
     @available(macOS 14.0, *)
     private func instanceMasks(_ request: VNImageBasedRequest) -> [[UInt8]] {
+        CullingEngine.visionLock.lock()
+        defer { CullingEngine.visionLock.unlock() }
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         guard (try? handler.perform([request])) != nil,
               let observation = request.results?.first as? VNInstanceMaskObservation else { return [] }

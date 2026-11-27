@@ -78,16 +78,23 @@ final class CullingSession: ObservableObject {
             var results = [PhotoAnalysis?](repeating: nil, count: jobs.count)
             let lock = NSLock()
             var done = 0
-            DispatchQueue.concurrentPerform(iterations: jobs.count) { i in
-                guard let self, !self.cancelled else { return }
-                let a = CullingEngine.analyze(id: jobs[i].0, url: jobs[i].1)
-                lock.lock()
-                results[i] = a
-                done += 1
-                let d = done
-                lock.unlock()
-                if d % 3 == 0 || d == jobs.count { DispatchQueue.main.async { self.progress = d } }
+            // A few workers: enough to keep previews decoding while Vision works, without flooding the GPU.
+            let queue = OperationQueue()
+            queue.maxConcurrentOperationCount = 3
+            queue.qualityOfService = .userInitiated
+            for i in jobs.indices {
+                queue.addOperation { [weak self] in
+                    guard let self, !self.cancelled else { return }
+                    let a = autoreleasepool { CullingEngine.analyze(id: jobs[i].0, url: jobs[i].1) }
+                    lock.lock()
+                    results[i] = a
+                    done += 1
+                    let d = done
+                    lock.unlock()
+                    if d % 3 == 0 || d == jobs.count { DispatchQueue.main.async { self.progress = d } }
+                }
             }
+            queue.waitUntilAllOperationsAreFinished()
             guard let self, !self.cancelled else { return }
             var all = results.compactMap { $0 }
             CullingEngine.finish(&all, sensitivity: sensitivity)

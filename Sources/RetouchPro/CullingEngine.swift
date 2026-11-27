@@ -87,6 +87,11 @@ struct PhotoAnalysis {
 }
 
 enum CullingEngine {
+    /// Vision's scene and face models share the GPU/Neural Engine and are not safe to hammer from many
+    /// threads at once (that crashed inside Core Image during a 2,500-photo cull). Previews are still
+    /// decoded in parallel; only the Vision part runs one photo at a time.
+    static let visionLock = NSLock()
+
     /// Tunable thresholds (exposed as "strictness" in the UI).
     /// Thresholds calibrated on sample portraits; "strictness" scales them.
     struct Sensitivity {
@@ -120,6 +125,8 @@ enum CullingEngine {
         }
         guard let cg = FastPreview.image(at: url, maxPixelSize: 1200) else { return a }
 
+        visionLock.lock()
+        defer { visionLock.unlock() }
         let handler = VNImageRequestHandler(cgImage: cg, options: [:])
         let classify = VNClassifyImageRequest()
         let landmarks = VNDetectFaceLandmarksRequest()
