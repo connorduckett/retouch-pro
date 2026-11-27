@@ -369,6 +369,39 @@ final class Library: ObservableObject {
         }
     }
 
+    /// The folder whose albums act as sorting categories right now (the folder being viewed, or the
+    /// folder of the album being viewed) — e.g. a wedding folder with an album per category.
+    var sortingFolder: Folder? {
+        switch selection {
+        case .folder(let id): return folders.first { $0.id == id }
+        case .album(let id): return folder(containingAlbum: id)
+        default: return nil
+        }
+    }
+
+    /// Moves photos into a category album: they leave the album being viewed (or every album of the
+    /// folder being viewed) so each photo ends up in exactly one category.
+    func sort(_ ids: [UUID], into albumID: UUID) {
+        switch selection {
+        case .album(let current) where current != albumID:
+            remove(ids, fromAlbum: current)
+        case .folder(let folderID):
+            if let f = folders.first(where: { $0.id == folderID }) {
+                for a in f.albums where a.id != albumID { remove(ids, fromAlbum: a.id) }
+            }
+        default:
+            break
+        }
+        add(ids, toAlbum: albumID)
+    }
+
+    /// Moves photos from one album to another (used by drag and drop).
+    func move(_ ids: [UUID], fromAlbum source: UUID, toAlbum target: UUID) {
+        guard source != target else { return }
+        remove(ids, fromAlbum: source)
+        add(ids, toAlbum: target)
+    }
+
     /// Removes photos from the library (and every album). The files on disk are not touched.
     func removeFromLibrary(_ photoIDs: [UUID]) {
         photos.removeAll { photoIDs.contains($0.id) }

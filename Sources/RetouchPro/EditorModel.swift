@@ -340,6 +340,40 @@ final class EditorModel: ObservableObject {
         return adj
     }
 
+    /// Sorts photos into a category album, then moves on to the next photo so you can keep going.
+    func sortPhotos(_ ids: [UUID], into albumID: UUID) {
+        let lib = Library.shared
+        guard !ids.isEmpty else { return }
+        let before = lib.visiblePhotos().map(\.id)
+        lib.sort(ids, into: albumID)
+        let after = Set(lib.visiblePhotos().map(\.id))
+        // The next photo (in the old order) that's still showing.
+        let lastIndex = ids.compactMap { before.firstIndex(of: $0) }.max() ?? -1
+        let next = before.dropFirst(lastIndex + 1).first { after.contains($0) && !ids.contains($0) }
+            ?? before.prefix(max(0, lastIndex)).last { after.contains($0) && !ids.contains($0) }
+        if mode == .library {
+            lib.gridSelection = next.map { [$0] } ?? []
+        } else if let current = currentPhotoID, ids.contains(current), !after.contains(current), let next {
+            openPhoto(next)
+        }
+    }
+
+    /// 1–9: send the selected photos (or the photo being edited) to that category album.
+    func sortSelected(intoAlbumNumber n: Int) -> Bool {
+        let lib = Library.shared
+        guard let folder = lib.sortingFolder, n >= 1, n <= folder.albums.count else { return false }
+        let target = folder.albums[n - 1].id
+        let ids: [UUID]
+        if mode == .library {
+            ids = lib.visiblePhotos().map(\.id).filter(lib.gridSelection.contains)
+        } else {
+            ids = currentPhotoID.map { [$0] } ?? []
+        }
+        guard !ids.isEmpty else { return false }
+        sortPhotos(ids, into: target)
+        return true
+    }
+
     /// Moves to the previous/next photo in the current library collection.
     func stepPhoto(_ delta: Int) {
         let photos = Library.shared.visiblePhotos()

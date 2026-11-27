@@ -212,6 +212,14 @@ private struct LibrarySidebar: View {
                     Text(album.name).lineLimit(1)
                 }
                 Spacer()
+                if library.sortingFolder?.id == folder.id, let n = folder.albums.firstIndex(where: { $0.id == album.id }), n < 9 {
+                    Text("\(n + 1)")
+                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                        .foregroundColor(selected ? .rpAccent : .rpCharcoal)
+                        .frame(width: 15, height: 15)
+                        .background(RoundedRectangle(cornerRadius: 3).fill(selected ? Color.white : Color.rpMist))
+                        .help("Press \(n + 1) to move selected photos here")
+                }
                 Text("\(album.photoIDs.count)").font(.system(size: 11).monospacedDigit()).opacity(0.7)
             }
             .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
@@ -266,10 +274,15 @@ private struct AlbumDropRow<Content: View>: View {
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.rpAccent, lineWidth: targeted ? 2 : 0))
             .onDrop(of: [.plainText, .fileURL, .image], isTargeted: $targeted) { providers in
                 if let p = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) }) {
+                    // Dragging from one album to another moves the photos; hold ⌥ to add a copy instead.
+                    let copy = NSEvent.modifierFlags.contains(.option)
                     _ = p.loadObject(ofClass: NSString.self) { obj, _ in
                         guard let text = obj as? String else { return }
-                        let ids = PhotoDrag.decode(text)
-                        DispatchQueue.main.async { Library.shared.add(ids, toAlbum: album.id) }
+                        let (ids, source) = PhotoDrag.decode(text)
+                        DispatchQueue.main.async {
+                            if let source, !copy { Library.shared.move(ids, fromAlbum: source, toAlbum: album.id) }
+                            else { Library.shared.add(ids, toAlbum: album.id) }
+                        }
                     }
                     return true
                 }
@@ -282,10 +295,17 @@ private struct AlbumDropRow<Content: View>: View {
 
 enum PhotoDrag {
     static let prefix = "retouchpro-photos:"
-    static func encode(_ ids: [UUID]) -> String { prefix + ids.map(\.uuidString).joined(separator: ",") }
-    static func decode(_ text: String) -> [UUID] {
-        guard text.hasPrefix(prefix) else { return [] }
-        return text.dropFirst(prefix.count).split(separator: ",").compactMap { UUID(uuidString: String($0)) }
+    /// `source` is the album the photos are dragged out of (so a drop can move rather than copy).
+    static func encode(_ ids: [UUID], from source: UUID? = nil) -> String {
+        prefix + (source?.uuidString ?? "-") + "|" + ids.map(\.uuidString).joined(separator: ",")
+    }
+    static func decode(_ text: String) -> (ids: [UUID], source: UUID?) {
+        guard text.hasPrefix(prefix) else { return ([], nil) }
+        let body = text.dropFirst(prefix.count)
+        let parts = body.split(separator: "|", maxSplits: 1).map(String.init)
+        let list = parts.count == 2 ? parts[1] : parts[0]
+        let source = parts.count == 2 ? UUID(uuidString: parts[0]) : nil
+        return (list.split(separator: ",").compactMap { UUID(uuidString: String($0)) }, source)
     }
 }
 
@@ -322,7 +342,7 @@ private struct PhotoGrid: View {
                                     .onTapGesture { click(photo.id, in: photos) }
                                     .onDrag {
                                         let ids = selected.contains(photo.id) ? photos.map(\.id).filter(selected.contains) : [photo.id]
-                                        return NSItemProvider(object: PhotoDrag.encode(ids) as NSString)
+                                        return NSItemProvider(object: PhotoDrag.encode(ids, from: model.currentAlbumID) as NSString)
                                     }
                                     .contextMenu { contextMenu(for: photo, in: photos) }
                             }
@@ -367,6 +387,16 @@ private struct PhotoGrid: View {
                     IconButton(systemName: "flag.fill", help: "Pick (P)") { model.flag(.pick) }
                     IconButton(systemName: "xmark", help: "Reject (X)") { model.flag(.reject) }
                     IconButton(systemName: "flag.slash", help: "Unflag (U)") { model.flag(nil) }
+                }
+                if let folder = library.sortingFolder {
+                    Menu {
+                        moveMenu(photos.map(\.id).filter(selected.contains), folder: folder)
+                    } label: {
+                        Label("Move to", systemImage: "arrow.right.square")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Move the selected photos into another category album (or press 1–9)")
                 }
                 Menu {
                     albumMenu(Array(selected))
@@ -414,6 +444,23 @@ private struct PhotoGrid: View {
         .background(Color.rpPaper)
     }
 
+    /// Category albums of the current folder, numbered to match the 1–9 shortcuts.
+    @ViewBuilder
+    private func moveMenu(_ ids: [UUID], folder: Folder) -> some View {
+        ForEach(Array(folder.albums.enumerated()), id: \.element.id) { index, album in
+            Button(index < 9 ? "\(album.name)    \(index + 1)" : album.name) {
+                model.sortPhotos(ids, into: album.id)
+            }
+            .disabled(library.selection == .album(album.id))
+        }
+        Divider()
+        Button("New Album in “\(folder.name)”…") {
+            let id = library.createAlbum(inFolder: folder.id)
+            model.sortPhotos(ids, into: id)
+            library.selection = .album(id)
+        }
+    }
+
     @ViewBuilder
     private func albumMenu(_ ids: [UUID]) -> some View {
         ForEach(library.folders) { folder in
@@ -443,6 +490,9 @@ private struct PhotoGrid: View {
             Button("Pick  (P)") { library.setFlag(.pick, for: ids) }
             Button("Reject  (X)") { library.setFlag(.reject, for: ids) }
             Button("Unflag  (U)") { library.setFlag(nil, for: ids) }
+        }
+        if let folder = library.sortingFolder {
+            Menu("Move to") { moveMenu(ids, folder: folder) }
         }
         Menu("Add to Album") { albumMenu(ids) }
         if case .album(let albumID) = library.selection {

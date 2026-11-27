@@ -60,6 +60,7 @@ enum KeyboardShortcuts {
             Item(keys: "X", action: "Reject"),
             Item(keys: "U", action: "Unflag"),
             Item(keys: "←  /  →", action: "Previous / next photo"),
+            Item(keys: "1 – 9", action: "Move photo(s) to that category album"),
             Item(keys: "Delete", action: "Remove photo (in Library)"),
             Item(keys: "⌘A  /  ⌘D", action: "Select all / none (in Library)"),
             Item(keys: "⌘O  /  ⇧⌘I", action: "Import photos"),
@@ -137,6 +138,11 @@ enum KeyboardShortcuts {
         }
 
         guard flags.isEmpty else { return false }
+
+        // 1–9 sort into the current folder's category albums (library and editor).
+        if let n = Int(key), (1...9).contains(n) {
+            return model.sortSelected(intoAlbumNumber: n)
+        }
 
         // Flags work in both the library and the editor.
         switch key {
