@@ -6,6 +6,7 @@ struct ContentView: View {
     @State private var showExport = false
     @State private var dropTargeted = false
     @State private var showShortcuts = false
+    @State private var showCulling = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,6 +62,15 @@ struct ContentView: View {
                 KeyboardShortcutsView(isPresented: $showShortcuts)
             }
         )
+        .overlay(
+            Color.clear.allowsHitTesting(false).sheet(isPresented: $showCulling) {
+                CullingAssistantView(isPresented: $showCulling)
+            }
+        )
+        .onReceive(NotificationCenter.default.publisher(for: .showCulling)) { _ in
+            model.flushEdits()
+            showCulling = true
+        }
         .alert("Couldn’t open photo", isPresented: Binding(
             get: { model.loadError != nil },
             set: { if !$0 { model.loadError = nil } }

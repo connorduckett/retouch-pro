@@ -31,6 +31,11 @@ struct LibraryPhoto: Codable, Identifiable, Equatable {
     var editedAt: Date?
     /// Pick (flagged), Rejected, or nil for unflagged.
     var flag: PhotoFlag?
+    /// Problems found by the Culling Assistant (PhotoIssue raw values).
+    var issues: [String]?
+
+    var issueList: [PhotoIssue] { (issues ?? []).compactMap(PhotoIssue.init(rawValue:)) }
+    var hasDefects: Bool { issueList.contains { $0.isDefect } }
 
     var name: String { (path as NSString).lastPathComponent }
     var isEdited: Bool { edits.map { !$0.isIdentity } ?? false }
@@ -54,6 +59,7 @@ enum LibrarySelection: Hashable {
     case edited
     case picks
     case rejected
+    case needsReview
     case folder(UUID)
     case album(UUID)
 }
@@ -148,6 +154,8 @@ final class Library: ObservableObject {
             return photos.filter { $0.flag == .pick }.sorted { $0.added > $1.added }
         case .rejected:
             return photos.filter { $0.flag == .reject }.sorted { $0.added > $1.added }
+        case .needsReview:
+            return photos.filter(\.hasDefects).sorted { $0.added > $1.added }
         case .folder(let id):
             guard let f = folders.first(where: { $0.id == id }) else { return [] }
             var seen = Set<UUID>()
@@ -164,6 +172,7 @@ final class Library: ObservableObject {
         case .edited: return "Edited"
         case .picks: return "Picks"
         case .rejected: return "Rejected"
+        case .needsReview: return "Needs Review"
         case .folder(let id): return folders.first { $0.id == id }?.name ?? "Folder"
         case .album(let id): return album(id)?.name ?? "Album"
         }
@@ -172,6 +181,18 @@ final class Library: ObservableObject {
     /// The current collection with the Pick/Reject filter applied — what the grid and filmstrip show.
     func visiblePhotos() -> [LibraryPhoto] {
         photos(in: selection).filter { flagFilter.includes($0.flag) }
+    }
+
+    func setIssues(_ issues: [UUID: [PhotoIssue]]) {
+        for i in photos.indices {
+            if let list = issues[photos[i].id] { photos[i].issues = list.isEmpty ? nil : list.map(\.rawValue) }
+        }
+        setNeedsSave()
+    }
+
+    func clearIssues(_ ids: [UUID]) {
+        for i in photos.indices where ids.contains(photos[i].id) { photos[i].issues = nil }
+        setNeedsSave()
     }
 
     func setFlag(_ flag: PhotoFlag?, for ids: [UUID]) {

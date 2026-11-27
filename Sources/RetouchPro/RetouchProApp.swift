@@ -202,6 +202,9 @@ struct LayerAndPhotoCommands: Commands {
                 .keyboardShortcut("d")
         }
         CommandMenu("Photo") {
+            Button("Culling Assistant…") { model.mode = .library; NotificationCenter.default.post(name: .showCulling, object: nil) }
+                .keyboardShortcut("k", modifiers: [.command, .shift])
+            Divider()
             Button("Pick    P") { model.flag(.pick) }
             Button("Reject    X") { model.flag(.reject) }
             Button("Unflag    U") { model.flag(nil) }
@@ -229,4 +232,5 @@ struct LayerAndPhotoCommands: Commands {
 extension Notification.Name {
     static let showExport = Notification.Name("RetouchPro.showExport")
     static let showShortcuts = Notification.Name("RetouchPro.showShortcuts")
+    static let showCulling = Notification.Name("RetouchPro.showCulling")
 }

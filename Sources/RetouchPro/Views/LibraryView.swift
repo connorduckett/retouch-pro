@@ -34,6 +34,18 @@ private struct LibrarySidebar: View {
                 row(.edited, icon: "slider.horizontal.3", title: "Edited", count: library.photos.filter(\.isEdited).count)
                 row(.picks, icon: "flag.fill", title: "Picks", count: library.photos.filter { $0.flag == .pick }.count)
                 row(.rejected, icon: "xmark.circle", title: "Rejected", count: library.photos.filter { $0.flag == .reject }.count)
+                row(.needsReview, icon: "exclamationmark.triangle", title: "Needs Review", count: library.photos.filter(\.hasDefects).count)
+
+                Button {
+                    NotificationCenter.default.post(name: .showCulling, object: nil)
+                } label: {
+                    Label("Cull a Shoot…", systemImage: "wand.and.stars")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(RPButtonStyle(kind: .primary))
+                .padding(.horizontal, 6)
+                .padding(.top, 10)
+                .help("Let Retouch Pro sort a shoot into categories and find closed eyes, talking, blur and duplicates (⇧⌘K)")
 
                 HStack {
                     sectionHeader("Folders")
@@ -381,6 +393,14 @@ private struct PhotoGrid: View {
             .foregroundColor(.rpSlate)
             .help("Thumbnail size")
             Button {
+                NotificationCenter.default.post(name: .showCulling, object: nil)
+            } label: {
+                Label("Cull", systemImage: "wand.and.stars")
+            }
+            .buttonStyle(RPButtonStyle())
+            .disabled(photos.isEmpty)
+            .help("Culling Assistant: sort these photos into categories and find problems (⇧⌘K)")
+            Button {
                 let ids = library.presentImportPanel(intoAlbum: model.currentAlbumID)
                 selected = Set(ids)
             } label: {
@@ -427,6 +447,9 @@ private struct PhotoGrid: View {
         Menu("Add to Album") { albumMenu(ids) }
         if case .album(let albumID) = library.selection {
             Button("Remove from Album") { library.remove(ids, fromAlbum: albumID); selected = [] }
+        }
+        if ids.contains(where: { library.photo($0)?.issues != nil }) {
+            Button("Clear Problem Tags") { library.clearIssues(ids) }
         }
         Divider()
         Button("Show in Finder") {
@@ -524,6 +547,16 @@ struct PhotoCell: View {
                         .padding(5)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .help(flag == .pick ? "Pick" : "Rejected")
+                }
+                if photo.hasDefects {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.orange)
+                        .padding(4)
+                        .background(Circle().fill(Color.black.opacity(0.55)))
+                        .padding(5)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                        .help(photo.issueList.filter(\.isDefect).map(\.rawValue).joined(separator: ", "))
                 }
                 if photo.isEdited {
                     Image(systemName: "slider.horizontal.3")

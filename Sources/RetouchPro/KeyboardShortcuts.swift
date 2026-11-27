@@ -63,6 +63,7 @@ enum KeyboardShortcuts {
             Item(keys: "Delete", action: "Remove photo (in Library)"),
             Item(keys: "⌘A  /  ⌘D", action: "Select all / none (in Library)"),
             Item(keys: "⌘O  /  ⇧⌘I", action: "Import photos"),
+            Item(keys: "⇧⌘K", action: "Culling Assistant"),
             Item(keys: "⇧⌘N  /  ⌥⌘N", action: "New folder / album"),
         ]),
         Section(title: "Editing", items: [
