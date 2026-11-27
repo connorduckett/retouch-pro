@@ -7,6 +7,8 @@ struct ContentView: View {
     @State private var dropTargeted = false
     @State private var showShortcuts = false
     @State private var showCulling = false
+    @State private var showSavePreset = false
+    @State private var batchExportIDs: [UUID]?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -67,6 +69,26 @@ struct ContentView: View {
                 CullingAssistantView(isPresented: $showCulling)
             }
         )
+        .background(
+            Color.clear.sheet(isPresented: $showSavePreset) {
+                PresetSaveSheet(isPresented: $showSavePreset).environmentObject(model)
+            }
+        )
+        .overlay(
+            Color.clear.allowsHitTesting(false).sheet(isPresented: Binding(
+                get: { batchExportIDs != nil }, set: { if !$0 { batchExportIDs = nil } })) {
+                ExportSheet(isPresented: Binding(get: { batchExportIDs != nil }, set: { if !$0 { batchExportIDs = nil } }),
+                            batchIDs: batchExportIDs ?? [])
+                    .environmentObject(model)
+            }
+        )
+        .overlay(alignment: .bottom) { BatchBanner().animation(.easeInOut, value: model.batchMessage) }
+        .onReceive(NotificationCenter.default.publisher(for: .showSavePreset)) { _ in
+            if model.hasImage { showSavePreset = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showBatchExport)) { note in
+            if let ids = note.object as? [UUID], !ids.isEmpty { batchExportIDs = ids }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .showCulling)) { _ in
             model.flushEdits()
             showCulling = true

@@ -27,6 +27,7 @@ final class CullingSession: ObservableObject {
     @Published var selectedCategory: UUID?
     @Published var showingIssuesOnly = false
     @Published var selection: Set<UUID> = []
+    var anchor: UUID?
     /// Photos you placed yourself (photo → category); used to sort look-alikes the same way.
     @Published var manual: [UUID: UUID] = [:]
     @Published var followLookAlikes = true
@@ -563,7 +564,7 @@ private struct ReviewStep: View {
             HStack {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title).font(.system(size: 15, weight: .semibold)).foregroundColor(.rpInk)
-                    Text(session.selection.isEmpty ? "\(ids.count) photos · click to select, ⌘-click for more"
+                    Text(session.selection.isEmpty ? "\(ids.count) photos · Shift-click selects a run, ⌘-click adds any photo"
                                                    : "\(session.selection.count) selected")
                         .font(.system(size: 11)).foregroundColor(.rpSlate)
                 }
@@ -611,11 +612,9 @@ private struct ReviewStep: View {
                         if let photo = library.photo(id) {
                             CullCell(photo: photo, analysis: session.analyses[id], selected: session.selection.contains(id))
                                 .onTapGesture {
-                                    if NSApp.currentEvent?.modifierFlags.contains(.command) == true {
-                                        if session.selection.contains(id) { session.selection.remove(id) } else { session.selection.insert(id) }
-                                    } else {
-                                        session.selection = [id]
-                                    }
+                                    var sel = session.selection
+                                    MultiSelect.click(id, ordered: ids, selection: &sel, anchor: &session.anchor)
+                                    session.selection = sel
                                 }
                                 .contextMenu {
                                     Menu("Move to") {

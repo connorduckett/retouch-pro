@@ -92,12 +92,26 @@ struct EditorCommands: Commands {
         }
         CommandGroup(after: .pasteboard) {
             Divider()
-            Button("Copy Edits") { model.copyEdits() }
+            Button("Copy Settings") { model.copySettings() }
                 .keyboardShortcut("c", modifiers: [.command, .shift])
-                .disabled(!model.hasImage)
-            Button("Paste Edits") { model.pasteEdits() }
+                .disabled(model.batchTargets.isEmpty)
+            Button("Paste Settings") { model.pasteSettings(to: model.batchTargets) }
                 .keyboardShortcut("v", modifiers: [.command, .shift])
-                .disabled(!model.hasImage || !model.hasClipboard)
+                .disabled(model.batchTargets.isEmpty || !model.hasSettingsClipboard)
+            Button("Save Preset…") { NotificationCenter.default.post(name: .showSavePreset, object: nil) }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
+                .disabled(!model.hasImage)
+            Menu("Apply Preset") {
+                ForEach(PresetStore.shared.presets) { preset in
+                    Button(preset.name) { model.applyPreset(preset, to: model.batchTargets) }
+                }
+            }
+            .disabled(model.batchTargets.isEmpty || PresetStore.shared.presets.isEmpty)
+            Button("Export Selected Photos…") {
+                NotificationCenter.default.post(name: .showBatchExport, object: model.batchTargets)
+            }
+            .keyboardShortcut("e", modifiers: [.command, .option])
+            .disabled(model.mode != .library || model.batchTargets.isEmpty)
             Divider()
             Button("Auto Enhance") { model.autoEnhance() }
                 .keyboardShortcut("a", modifiers: [.command, .shift])
@@ -234,4 +248,6 @@ extension Notification.Name {
     static let showExport = Notification.Name("RetouchPro.showExport")
     static let showShortcuts = Notification.Name("RetouchPro.showShortcuts")
     static let showCulling = Notification.Name("RetouchPro.showCulling")
+    static let showSavePreset = Notification.Name("RetouchPro.showSavePreset")
+    static let showBatchExport = Notification.Name("RetouchPro.showBatchExport")
 }

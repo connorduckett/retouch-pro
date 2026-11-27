@@ -78,6 +78,10 @@ final class Library: ObservableObject {
     @Published var flagFilter: FlagFilter = .all
     /// Photos selected in the grid.
     @Published var gridSelection: Set<UUID> = []
+    /// Where a Shift-click range starts (the last photo clicked without Shift).
+    var gridAnchor: UUID?
+    /// The photo a Shift-arrow extension is currently at.
+    var gridCursor: UUID?
     /// Bumped when a photo's thumbnail changes so grids reload it.
     @Published private(set) var thumbnailVersion: [UUID: Int] = [:]
 
@@ -445,6 +449,45 @@ final class Library: ObservableObject {
         DispatchQueue.main.async {
             self.thumbnailVersion[id, default: 0] += 1
         }
+    }
+}
+
+/// Finder-style multi-selection shared by the library grid and the Culling Assistant.
+enum MultiSelect {
+    /// - Click: select just this photo.
+    /// - ⌘-click: add or remove this photo, in any order.
+    /// - Shift-click: select every photo from the anchor to this one, in order (⌘⇧ adds the range).
+    static func click(_ id: UUID, ordered: [UUID], selection: inout Set<UUID>, anchor: inout UUID?,
+                      flags: NSEvent.ModifierFlags = NSEvent.modifierFlags) {   // live keyboard state: reliable inside SwiftUI gestures
+        let command = flags.contains(.command), shift = flags.contains(.shift)
+        if shift {
+            let start = anchor.flatMap { a in ordered.firstIndex(of: a) }
+                ?? ordered.firstIndex { selection.contains($0) }
+            if let start, let end = ordered.firstIndex(of: id) {
+                let range = Set(ordered[min(start, end)...max(start, end)])
+                selection = command ? selection.union(range) : range
+                if anchor == nil { anchor = ordered[start] }
+                return
+            }
+        }
+        if command {
+            if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
+        } else {
+            selection = [id]
+        }
+        anchor = id
+    }
+
+    /// Shift-arrow: extend the selection one photo at a time.
+    static func extend(_ delta: Int, ordered: [UUID], selection: inout Set<UUID>, anchor: inout UUID?, cursor: inout UUID?) {
+        guard !ordered.isEmpty else { return }
+        let a = anchor ?? cursor ?? ordered.first { selection.contains($0) } ?? ordered[0]
+        let c = cursor ?? a
+        guard let ci = ordered.firstIndex(of: c), let ai = ordered.firstIndex(of: a) else { return }
+        let ni = min(max(0, ci + delta), ordered.count - 1)
+        selection = Set(ordered[min(ai, ni)...max(ai, ni)])
+        anchor = a
+        cursor = ordered[ni]
     }
 }
 

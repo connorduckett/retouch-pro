@@ -6,6 +6,11 @@ struct ExportSheet: View {
     @Binding var isPresented: Bool
     @State private var error: String?
     @State private var done: URL?
+    /// Batch export: the library photos to export (empty = the open photo).
+    var batchIDs: [UUID] = []
+    @State private var batchProgress: Int?
+    @State private var batchResult: (written: Int, failed: [String], folder: URL)?
+    private var isBatch: Bool { !batchIDs.isEmpty }
 
     private let sizes: [(String, Int?)] = [
         ("Full size", nil), ("4096 px", 4096), ("2048 px (web)", 2048), ("1080 px (social)", 1080),
@@ -16,12 +21,16 @@ struct ExportSheet: View {
             HStack {
                 Image(systemName: "square.and.arrow.up")
                     .font(.system(size: 18))
-                Text("Export Photo")
+                Text(isBatch ? "Export \(batchIDs.count) Photos" : "Export Photo")
                     .font(.system(size: 17, weight: .semibold))
             }
             .foregroundColor(.rpInk)
 
-            if let done {
+            if let result = batchResult {
+                batchDoneView(result)
+            } else if let progress = batchProgress {
+                batchProgressView(progress)
+            } else if let done {
                 successView(done)
             } else {
                 form
@@ -112,9 +121,11 @@ struct ExportSheet: View {
                     .buttonStyle(RPButtonStyle())
                     .keyboardShortcut(.cancelAction)
                 Button {
-                    chooseDestination()
+                    if isBatch { chooseFolder() } else { chooseDestination() }
                 } label: {
-                    if model.isExporting {
+                    if isBatch {
+                        Text("Choose Folder & Export…")
+                    } else if model.isExporting {
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.small).colorInvert()
                             Text("Exporting…")
@@ -159,7 +170,68 @@ struct ExportSheet: View {
         return q >= 95 ? "Maximum" : q >= 85 ? "High" : q >= 70 ? "Medium" : "Small file"
     }
 
+    private func batchProgressView(_ n: Int) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Exporting photo \(min(n + 1, batchIDs.count)) of \(batchIDs.count)…")
+                .font(.system(size: 13, weight: .medium)).foregroundColor(.rpInk)
+            ProgressView(value: Double(n), total: Double(batchIDs.count))
+            Text("Each photo is rendered at full quality with its own edits. RAW files take a second or two each.")
+                .font(.system(size: 11)).foregroundColor(.rpSlate)
+            HStack {
+                Spacer()
+                Button("Stop") { model.cancelBatchExport() }
+                    .buttonStyle(RPButtonStyle())
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+    }
+
+    private func batchDoneView(_ r: (written: Int, failed: [String], folder: URL)) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: r.failed.isEmpty ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .font(.system(size: 28))
+                    .foregroundColor(r.failed.isEmpty ? .rpCharcoal : .orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Exported \(r.written) photo\(r.written == 1 ? "" : "s")")
+                        .font(.system(size: 14, weight: .semibold)).foregroundColor(.rpInk)
+                    Text(r.folder.path).font(.system(size: 11)).foregroundColor(.rpSlate).lineLimit(1).truncationMode(.middle)
+                    if !r.failed.isEmpty {
+                        Text("Couldn’t export: \(r.failed.prefix(5).joined(separator: ", "))\(r.failed.count > 5 ? "…" : "")")
+                            .font(.system(size: 11)).foregroundColor(.orange)
+                    }
+                }
+            }
+            HStack {
+                Button("Show in Finder") { NSWorkspace.shared.open(r.folder) }
+                    .buttonStyle(RPButtonStyle())
+                Spacer()
+                Button("Done") { isPresented = false }
+                    .buttonStyle(RPButtonStyle(kind: .primary))
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Export Here"
+        panel.message = "Choose a folder for the \(batchIDs.count) exported photos"
+        if let dir = model.lastExportURL?.deletingLastPathComponent() { panel.directoryURL = dir }
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        batchProgress = 0
+        model.exportBatch(batchIDs, to: folder, progress: { batchProgress = $0 }) { written, failed in
+            batchProgress = nil
+            batchResult = (written, failed, folder)
+            model.lastExportURL = folder.appendingPathComponent("x")
+        }
+    }
+
     private var outputDescription: String {
+        if isBatch { return "\(batchIDs.count) photos · each with its own edits" }
         let s = model.outputSize
         guard s.width > 0 else { return "" }
         var w = s.width, h = s.height

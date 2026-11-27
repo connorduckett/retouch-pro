@@ -108,6 +108,14 @@ struct AdjustPanel: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(RPButtonStyle())
+                Button {
+                    NotificationCenter.default.post(name: .showSavePreset, object: nil)
+                } label: {
+                    Label("Save as Preset…", systemImage: "square.stack.3d.down.right")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(RPButtonStyle())
+                .help("Save these settings to apply to other photos (⇧⌘P)")
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.rpCard))
@@ -135,6 +143,7 @@ struct LooksPanel: View {
 
     var body: some View {
         VStack(spacing: 12) {
+            PresetList()
             if model.state.lookID != nil {
                 SectionCard(title: "Strength") {
                     RPSlider(

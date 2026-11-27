@@ -314,7 +314,6 @@ enum PhotoDrag {
 private struct PhotoGrid: View {
     @EnvironmentObject var model: EditorModel
     @ObservedObject private var library = Library.shared
-    @State private var anchor: UUID?
     private var selected: Set<UUID> {
         get { library.gridSelection }
         nonmutating set { library.gridSelection = newValue }
@@ -338,8 +337,9 @@ private struct PhotoGrid: View {
                             ForEach(photos) { photo in
                                 PhotoCell(photo: photo, selected: selected.contains(photo.id),
                                           current: photo.id == model.currentPhotoID, size: thumbSize)
-                                    .onTapGesture(count: 2) { model.openPhoto(photo.id) }
+                                    // Select instantly on the first click; a double-click also opens the photo.
                                     .onTapGesture { click(photo.id, in: photos) }
+                                    .simultaneousGesture(TapGesture(count: 2).onEnded { model.openPhoto(photo.id) })
                                     .onDrag {
                                         let ids = selected.contains(photo.id) ? photos.map(\.id).filter(selected.contains) : [photo.id]
                                         return NSItemProvider(object: PhotoDrag.encode(ids, from: model.currentAlbumID) as NSString)
@@ -388,6 +388,14 @@ private struct PhotoGrid: View {
                     IconButton(systemName: "xmark", help: "Reject (X)") { model.flag(.reject) }
                     IconButton(systemName: "flag.slash", help: "Unflag (U)") { model.flag(nil) }
                 }
+                Menu {
+                    BatchMenuItems(ids: photos.map(\.id).filter(selected.contains))
+                } label: {
+                    Label("Batch", systemImage: "square.stack.3d.down.right")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Apply a preset, paste settings or export all selected photos")
                 if let folder = library.sortingFolder {
                     Menu {
                         moveMenu(photos.map(\.id).filter(selected.contains), folder: folder)
@@ -495,6 +503,9 @@ private struct PhotoGrid: View {
             Menu("Move to") { moveMenu(ids, folder: folder) }
         }
         Menu("Add to Album") { albumMenu(ids) }
+        Divider()
+        BatchMenuItems(ids: ids)
+        Divider()
         if case .album(let albumID) = library.selection {
             Button("Remove from Album") { library.remove(ids, fromAlbum: albumID); selected = [] }
         }
@@ -522,17 +533,12 @@ private struct PhotoGrid: View {
     }
 
     private func click(_ id: UUID, in photos: [LibraryPhoto]) {
-        let flags = NSApp.currentEvent?.modifierFlags ?? []
-        if flags.contains(.command) {
-            if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
-            anchor = id
-        } else if flags.contains(.shift), let anchor,
-                  let a = photos.firstIndex(where: { $0.id == anchor }), let b = photos.firstIndex(where: { $0.id == id }) {
-            selected = Set(photos[min(a, b)...max(a, b)].map(\.id))
-        } else {
-            selected = [id]
-            anchor = id
-        }
+        var sel = library.gridSelection
+        var anchor = library.gridAnchor
+        MultiSelect.click(id, ordered: photos.map(\.id), selection: &sel, anchor: &anchor)
+        library.gridSelection = sel
+        library.gridAnchor = anchor
+        library.gridCursor = id
     }
 
     private var emptyState: some View {

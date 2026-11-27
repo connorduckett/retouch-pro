@@ -63,6 +63,8 @@ enum KeyboardShortcuts {
             Item(keys: "1 – 9", action: "Move photo(s) to that category album"),
             Item(keys: "Delete", action: "Remove photo (in Library)"),
             Item(keys: "⌘A  /  ⌘D", action: "Select all / none (in Library)"),
+            Item(keys: "⌘-click", action: "Add or remove one photo from the selection"),
+            Item(keys: "Shift-click  /  ⇧←→", action: "Select a run of photos in order"),
             Item(keys: "⌘O  /  ⇧⌘I", action: "Import photos"),
             Item(keys: "⇧⌘K", action: "Culling Assistant"),
             Item(keys: "⇧⌘N  /  ⌥⌘N", action: "New folder / album"),
@@ -70,7 +72,9 @@ enum KeyboardShortcuts {
         Section(title: "Editing", items: [
             Item(keys: "⇧A", action: "Auto Enhance (auto tone)"),
             Item(keys: "⌘Z  /  ⇧⌘Z", action: "Undo / redo"),
-            Item(keys: "⇧⌘C  /  ⇧⌘V", action: "Copy / paste edit settings"),
+            Item(keys: "⇧⌘C  /  ⇧⌘V", action: "Copy settings / paste onto all selected photos"),
+            Item(keys: "⇧⌘P", action: "Save settings as a preset"),
+            Item(keys: "⌥⌘E", action: "Export all selected photos"),
             Item(keys: "⌘[  /  ⌘]", action: "Rotate left / right"),
             Item(keys: "⇧⌘R", action: "Reset all edits"),
             Item(keys: "⌘S", action: "Save edits now (they also save automatically)"),
@@ -125,6 +129,18 @@ enum KeyboardShortcuts {
                 return true
             default: break
             }
+        }
+
+        if flags == [.shift] && model.mode == .library {
+            switch event.keyCode {
+            case 123: model.stepPhoto(-1, inLibraryGrid: true, extend: true); return true
+            case 124: model.stepPhoto(1, inLibraryGrid: true, extend: true); return true
+            default: break
+            }
+        }
+        if flags == [.command] && model.mode == .library && key == "a" {
+            library.gridSelection = Set(library.visiblePhotos().map(\.id))
+            return true
         }
 
         if flags == [.shift] {

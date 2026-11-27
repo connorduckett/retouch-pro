@@ -161,20 +161,43 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    // MARK: Batch state (see Presets.swift)
+
+    var settingsClipboard: Preset?
+    @Published var hasSettingsClipboard = false
+    @Published var batchMessage: String? {
+        didSet {
+            guard batchMessage != nil else { return }
+            let msg = batchMessage
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                if self?.batchMessage == msg { self?.batchMessage = nil }
+            }
+        }
+    }
+    var batchCancelled = false
+
     // MARK: Shortcut helpers
 
     @Published var showFilmstrip = true
     @Published var isPickingWhiteBalance = false
 
-    /// In the library grid, arrows move the selection; in the editor they change photo.
-    func stepPhoto(_ delta: Int, inLibraryGrid: Bool) {
+    /// In the library grid, arrows move the selection (Shift-arrows extend it); in the editor they change photo.
+    func stepPhoto(_ delta: Int, inLibraryGrid: Bool, extend: Bool = false) {
         guard inLibraryGrid else { stepPhoto(delta); return }
         let lib = Library.shared
-        let photos = lib.visiblePhotos()
-        guard !photos.isEmpty else { return }
-        let current = photos.firstIndex { lib.gridSelection.contains($0.id) } ?? -1
-        let j = min(max(0, current + delta), photos.count - 1)
-        lib.gridSelection = [photos[j].id]
+        let ids = lib.visiblePhotos().map(\.id)
+        guard !ids.isEmpty else { return }
+        if extend {
+            var sel = lib.gridSelection, anchor = lib.gridAnchor, cursor = lib.gridCursor
+            MultiSelect.extend(delta, ordered: ids, selection: &sel, anchor: &anchor, cursor: &cursor)
+            lib.gridSelection = sel; lib.gridAnchor = anchor; lib.gridCursor = cursor
+            return
+        }
+        let current = lib.gridCursor.flatMap { ids.firstIndex(of: $0) } ?? ids.firstIndex { lib.gridSelection.contains($0) } ?? -1
+        let j = min(max(0, current + delta), ids.count - 1)
+        lib.gridSelection = [ids[j]]
+        lib.gridAnchor = ids[j]
+        lib.gridCursor = ids[j]
     }
 
     /// Removes the selected library photos (from the album when viewing one, otherwise from the library).
@@ -1168,68 +1191,12 @@ final class EditorModel: ObservableObject {
         guard let full = sourceFull else { return }
         let options = exportOptions
         let state = self.state
-        let fullSize = self.fullSize
         let sourceURL = fileURL
         isExporting = true
 
         workQueue.async { [weak self] in
             let result: Result<URL, Error> = Result {
-                var source = full
-                if let target = options.longEdge {
-                    let out = ImagePipeline.geometry(sourceSize: fullSize, state: state).crop.size
-                    let scale = CGFloat(target) / max(out.width, out.height)
-                    if scale < 1 { source = ImagePipeline.scaled(full, by: scale) }
-                }
-                var img = ImagePipeline.render(source: source, state: state)
-                let extent = img.extent
-
-                if options.watermark,
-                   !options.watermarkText.trimmingCharacters(in: .whitespaces).isEmpty,
-                   let wm = ImagePipeline.watermark(
-                       text: options.watermarkText,
-                       fontSize: max(extent.width, extent.height) * options.watermarkSize / 100,
-                       opacity: options.watermarkOpacity / 100) {
-                    let margin = min(extent.width, extent.height) * 0.03
-                    let ww = wm.extent.width, wh = wm.extent.height
-                    let origin: CGPoint
-                    switch options.watermarkPosition {
-                    case .bottomRight: origin = CGPoint(x: extent.maxX - ww - margin, y: margin)
-                    case .bottomLeft: origin = CGPoint(x: margin, y: margin)
-                    case .topRight: origin = CGPoint(x: extent.maxX - ww - margin, y: extent.maxY - wh - margin)
-                    case .topLeft: origin = CGPoint(x: margin, y: extent.maxY - wh - margin)
-                    case .center: origin = CGPoint(x: extent.midX - ww / 2, y: extent.midY - wh / 2)
-                    }
-                    img = wm.transformed(by: CGAffineTransform(translationX: origin.x, y: origin.y))
-                        .composited(over: img).cropped(to: extent)
-                }
-
-                let format: CIFormat = options.format == .tiff ? .RGBA16 : .RGBA8
-                guard let cg = ImagePipeline.cgImage(img, colorSpace: options.colorProfile.space, format: format) else {
-                    throw ExportError.render
-                }
-                guard let dest = CGImageDestinationCreateWithURL(url as CFURL, options.format.type.identifier as CFString, 1, nil) else {
-                    throw ExportError.write
-                }
-                var props: [CFString: Any] = [:]
-                if options.keepMetadata, let sourceURL,
-                   let src = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
-                   let meta = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
-                    for key in [kCGImagePropertyExifDictionary, kCGImagePropertyIPTCDictionary,
-                                kCGImagePropertyGPSDictionary, kCGImagePropertyTIFFDictionary] {
-                        if var dict = meta[key] as? [CFString: Any] {
-                            dict.removeValue(forKey: kCGImagePropertyTIFFOrientation)
-                            dict.removeValue(forKey: kCGImagePropertyExifPixelXDimension)
-                            dict.removeValue(forKey: kCGImagePropertyExifPixelYDimension)
-                            props[key] = dict
-                        }
-                    }
-                }
-                props[kCGImagePropertyOrientation] = 1
-                if options.format.isLossy {
-                    props[kCGImageDestinationLossyCompressionQuality] = options.quality / 100
-                }
-                CGImageDestinationAddImage(dest, cg, props as CFDictionary)
-                guard CGImageDestinationFinalize(dest) else { throw ExportError.write }
+                try Self.renderExport(full: full, sourceURL: sourceURL, state: state, options: options, to: url)
                 return url
             }
             DispatchQueue.main.async {
@@ -1241,6 +1208,67 @@ final class EditorModel: ObservableObject {
                 completion(result)
             }
         }
+    }
+
+    /// Renders a photo with its edits at full quality and writes it — shared by single and batch export.
+    static func renderExport(full: CIImage, sourceURL: URL?, state: EditState, options: ExportOptions, to url: URL) throws {
+        let fullSize = full.extent.size
+        var source = full
+        if let target = options.longEdge {
+            let out = ImagePipeline.geometry(sourceSize: fullSize, state: state).crop.size
+            let scale = CGFloat(target) / max(out.width, out.height)
+            if scale < 1 { source = ImagePipeline.scaled(full, by: scale) }
+        }
+        var img = ImagePipeline.render(source: source, state: state)
+        let extent = img.extent
+
+        if options.watermark,
+           !options.watermarkText.trimmingCharacters(in: .whitespaces).isEmpty,
+           let wm = ImagePipeline.watermark(
+               text: options.watermarkText,
+               fontSize: max(extent.width, extent.height) * options.watermarkSize / 100,
+               opacity: options.watermarkOpacity / 100) {
+            let margin = min(extent.width, extent.height) * 0.03
+            let ww = wm.extent.width, wh = wm.extent.height
+            let origin: CGPoint
+            switch options.watermarkPosition {
+            case .bottomRight: origin = CGPoint(x: extent.maxX - ww - margin, y: margin)
+            case .bottomLeft: origin = CGPoint(x: margin, y: margin)
+            case .topRight: origin = CGPoint(x: extent.maxX - ww - margin, y: extent.maxY - wh - margin)
+            case .topLeft: origin = CGPoint(x: margin, y: extent.maxY - wh - margin)
+            case .center: origin = CGPoint(x: extent.midX - ww / 2, y: extent.midY - wh / 2)
+            }
+            img = wm.transformed(by: CGAffineTransform(translationX: origin.x, y: origin.y))
+                .composited(over: img).cropped(to: extent)
+        }
+
+        let format: CIFormat = options.format == .tiff ? .RGBA16 : .RGBA8
+        guard let cg = ImagePipeline.cgImage(img, colorSpace: options.colorProfile.space, format: format) else {
+            throw ExportError.render
+        }
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, options.format.type.identifier as CFString, 1, nil) else {
+            throw ExportError.write
+        }
+        var props: [CFString: Any] = [:]
+        if options.keepMetadata, let sourceURL,
+           let src = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+           let meta = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
+            for key in [kCGImagePropertyExifDictionary, kCGImagePropertyIPTCDictionary,
+                        kCGImagePropertyGPSDictionary, kCGImagePropertyTIFFDictionary] {
+                if var dict = meta[key] as? [CFString: Any] {
+                    dict.removeValue(forKey: kCGImagePropertyTIFFOrientation)
+                    dict.removeValue(forKey: kCGImagePropertyExifPixelXDimension)
+                    dict.removeValue(forKey: kCGImagePropertyExifPixelYDimension)
+                    props[key] = dict
+                }
+            }
+        }
+        props[kCGImagePropertyOrientation] = 1
+        if options.format.isLossy {
+            props[kCGImageDestinationLossyCompressionQuality] = options.quality / 100
+        }
+        CGImageDestinationAddImage(dest, cg, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { throw ExportError.write }
     }
 
     enum ExportError: LocalizedError {
