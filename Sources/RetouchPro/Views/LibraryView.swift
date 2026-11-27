@@ -579,10 +579,12 @@ struct PhotoCell: View {
         .opacity(photo.flag == .reject ? 0.45 : 1)
         .contentShape(Rectangle())
         .onAppear(perform: load)
+        .onDisappear { if image == nil { ThumbnailCache.shared.cancel(photo.id) } }
         .onChange(of: library.thumbnailVersion[photo.id]) { _ in load() }
     }
 
     private func load() {
+        if image == nil, let cached = ThumbnailCache.shared.cachedThumbnail(for: photo.id) { image = cached; return }
         ThumbnailCache.shared.thumbnail(for: photo) { image = $0 }
     }
 }

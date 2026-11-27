@@ -89,11 +89,7 @@ enum CullingEngine {
         if a.date == nil {
             a.date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         }
-        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 1200,
-        ] as CFDictionary) else { return a }
+        guard let cg = FastPreview.image(at: url, maxPixelSize: 1200) else { return a }
 
         let handler = VNImageRequestHandler(cgImage: cg, options: [:])
         let classify = VNClassifyImageRequest()

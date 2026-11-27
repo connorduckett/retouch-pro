@@ -379,6 +379,7 @@ final class Library: ObservableObject {
         }
         for id in photoIDs {
             try? FileManager.default.removeItem(at: editedThumbnailURL(id))
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent("Thumbnails/Originals/\(id.uuidString).jpg"))
             ThumbnailCache.shared.forget(id)
         }
         setNeedsSave()
@@ -414,43 +415,134 @@ final class Library: ObservableObject {
     }
 }
 
-/// Loads small previews for the library grid and filmstrip, in the background.
+/// Fast previews straight from a photo file.
+enum FastPreview {
+    /// Uses the preview the camera already embedded in the file (RAW and camera JPEGs have one) when it's
+    /// big enough, and only decodes the full photo when it isn't. Decoding a RAW file fully takes seconds;
+    /// reading its embedded preview takes milliseconds.
+    static func image(at url: URL, maxPixelSize: Int) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        let embedded = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCacheImmediately: true,
+        ] as CFDictionary)
+        if let embedded, max(embedded.width, embedded.height) >= min(maxPixelSize, 640) * 7 / 10 {
+            return embedded
+        }
+        // The embedded preview is missing or tiny (e.g. a 160-px EXIF thumbnail): decode, subsampled.
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCacheImmediately: true,
+        ] as CFDictionary) ?? embedded
+    }
+}
+
+/// Loads small previews for the library grid and filmstrip: a few at a time, newest requests first,
+/// cancelled when a photo scrolls out of view, and saved to disk so the next launch is instant.
 final class ThumbnailCache {
     static let shared = ThumbnailCache()
     private let cache = NSCache<NSString, NSImage>()
-    private let queue = DispatchQueue(label: "retouchpro.thumbs", qos: .userInitiated, attributes: .concurrent)
+    private let queue: OperationQueue = {
+        let q = OperationQueue()
+        q.name = "retouchpro.thumbs"
+        q.maxConcurrentOperationCount = max(2, min(6, ProcessInfo.processInfo.activeProcessorCount / 2))
+        q.qualityOfService = .userInitiated
+        return q
+    }()
+    private let lock = NSLock()
+    private var operations: [UUID: Operation] = [:]
+    private var waiters: [UUID: [(NSImage?) -> Void]] = [:]
+    private let size = 420
+
+    init() {
+        cache.countLimit = 3000
+    }
+
+    private var diskDirectory: URL {
+        Library.shared.directory.appendingPathComponent("Thumbnails/Originals", isDirectory: true)
+    }
 
     func forget(_ id: UUID) {
         cache.removeObject(forKey: id.uuidString as NSString)
     }
 
+    /// Stops loading a thumbnail nobody is looking at any more.
+    func cancel(_ id: UUID) {
+        lock.lock()
+        if let op = operations[id], !op.isExecuting {
+            op.cancel()
+            operations[id] = nil
+            waiters[id] = nil
+        }
+        lock.unlock()
+    }
+
+    func cachedThumbnail(for id: UUID) -> NSImage? {
+        cache.object(forKey: id.uuidString as NSString)
+    }
+
     func thumbnail(for photo: LibraryPhoto, completion: @escaping (NSImage?) -> Void) {
         let key = photo.id.uuidString as NSString
         if let hit = cache.object(forKey: key) { completion(hit); return }
+
+        lock.lock()
+        if waiters[photo.id] != nil {
+            waiters[photo.id]!.append(completion)
+            operations[photo.id]?.queuePriority = .veryHigh
+            lock.unlock()
+            return
+        }
+        waiters[photo.id] = [completion]
+        lock.unlock()
+
         let library = Library.shared
         let editedURL = library.editedThumbnailURL(photo.id)
+        let diskURL = diskDirectory.appendingPathComponent("\(photo.id.uuidString).jpg")
         let fileURL = URL(fileURLWithPath: photo.path)
-        let bookmarkURL: () -> URL? = { library.url(for: photo) }
-        queue.async {
+        let size = self.size
+        let dir = diskDirectory
+
+        let op = BlockOperation()
+        op.addExecutionBlock { [weak self, weak op] in
+            guard let self, op?.isCancelled == false else { return }
             var image: NSImage?
             if photo.isEdited, let edited = NSImage(contentsOf: editedURL) {
                 image = edited
+            } else if let saved = NSImage(contentsOf: diskURL) {
+                image = saved
             } else {
-                var source = CGImageSourceCreateWithURL(fileURL as CFURL, nil)
-                if source == nil, let moved = DispatchQueue.main.sync(execute: bookmarkURL) {
-                    source = CGImageSourceCreateWithURL(moved as CFURL, nil)
+                var url = fileURL
+                if !FileManager.default.fileExists(atPath: url.path),
+                   let moved = DispatchQueue.main.sync(execute: { library.url(for: photo) }) {
+                    url = moved
                 }
-                if let source,
-                   let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                       kCGImageSourceCreateThumbnailFromImageAlways: true,
-                       kCGImageSourceCreateThumbnailWithTransform: true,
-                       kCGImageSourceThumbnailMaxPixelSize: 420,
-                   ] as CFDictionary) {
+                if let cg = FastPreview.image(at: url, maxPixelSize: size) {
                     image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                    // Save for next time.
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    if let dest = CGImageDestinationCreateWithURL(diskURL as CFURL, "public.jpeg" as CFString, 1, nil) {
+                        CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
+                        CGImageDestinationFinalize(dest)
+                    }
                 }
             }
             if let image { self.cache.setObject(image, forKey: key) }
-            DispatchQueue.main.async { completion(image) }
+            self.lock.lock()
+            let callbacks = self.waiters.removeValue(forKey: photo.id) ?? []
+            self.operations[photo.id] = nil
+            self.lock.unlock()
+            DispatchQueue.main.async { callbacks.forEach { $0(image) } }
         }
+        // Newest requests are what's on screen now.
+        op.queuePriority = .high
+        lock.lock()
+        for (_, other) in operations where other.queuePriority == .high { other.queuePriority = .normal }
+        operations[photo.id] = op
+        lock.unlock()
+        queue.addOperation(op)
     }
 }
