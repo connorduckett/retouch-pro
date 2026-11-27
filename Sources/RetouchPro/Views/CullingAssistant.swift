@@ -27,6 +27,10 @@ final class CullingSession: ObservableObject {
     @Published var selectedCategory: UUID?
     @Published var showingIssuesOnly = false
     @Published var selection: Set<UUID> = []
+    /// Photos you placed yourself (photo → category); used to sort look-alikes the same way.
+    @Published var manual: [UUID: UUID] = [:]
+    @Published var followLookAlikes = true
+    @Published var lastAutoMove: (count: Int, undo: [CullingCategories.Category])?
 
     private var cancelled = false
 
@@ -123,10 +127,62 @@ final class CullingSession: ObservableObject {
     }
 
     func move(_ ids: [UUID], to target: UUID) {
-        for i in categories.indices { categories[i].photoIDs.removeAll { ids.contains($0) } }
-        if let t = categories.firstIndex(where: { $0.id == target }) { categories[t].photoIDs.append(contentsOf: ids) }
-        categories.removeAll { $0.photoIDs.isEmpty && $0.id != target }
+        let before = categories
+        place(ids, in: target)
+        for id in ids { manual[id] = target }
         selection = []
+        lastAutoMove = nil
+        if followLookAlikes {
+            let moved = sortLookAlikes(of: ids)
+            if moved > 0 { lastAutoMove = (moved, before) }
+        }
+        categories.removeAll { $0.photoIDs.isEmpty && $0.id != target }
+    }
+
+    private func place(_ ids: [UUID], in target: UUID) {
+        for i in categories.indices { categories[i].photoIDs.removeAll { ids.contains($0) } }
+        if let t = categories.firstIndex(where: { $0.id == target }) {
+            categories[t].photoIDs.append(contentsOf: ids)
+            // Keep each category in shooting order.
+            let order = Dictionary(uniqueKeysWithValues: analyses.values.map { ($0.id, $0.date ?? .distantPast) })
+            categories[t].photoIDs.sort { (order[$0] ?? .distantPast) < (order[$1] ?? .distantPast) }
+        }
+    }
+
+    /// Moves photos that look like the ones you just placed (same scene, same people, same setup) —
+    /// unless you placed them yourself — into the same category.
+    @discardableResult
+    func sortLookAlikes(of examples: [UUID]) -> Int {
+        let exampleSet = Set(examples)
+        let allManual = manual
+        var moves: [UUID: UUID] = [:]
+        for (id, a) in analyses where allManual[id] == nil {
+            // Nearest photo you placed yourself.
+            var best: (UUID, Double)?
+            for (exampleID, _) in allManual {
+                guard let e = analyses[exampleID], let d = CullingEngine.distance(a, e) else { continue }
+                if best == nil || d < best!.1 { best = (exampleID, d) }
+            }
+            guard let (exampleID, distance) = best, exampleSet.contains(exampleID), distance < 0.42,
+                  let target = allManual[exampleID], let example = analyses[exampleID] else { continue }
+            // Same part of the day (the same set of shots), not just a similar-looking scene.
+            if let d1 = a.date, let d2 = example.date, abs(d1.timeIntervalSince(d2)) > 20 * 60 { continue }
+            if a.date == nil && a.moment != example.moment { continue }
+            let current = categories.first { $0.photoIDs.contains(id) }?.id
+            if current != target { moves[id] = target }
+        }
+        for target in Set(moves.values) {
+            place(moves.filter { $0.value == target }.map(\.key), in: target)
+        }
+        return moves.count
+    }
+
+    func undoLookAlikes() {
+        guard let last = lastAutoMove else { return }
+        // Restore everything, then re-apply only your own moves.
+        categories = last.undo
+        for (id, target) in manual where categories.contains(where: { $0.id == target }) { place([id], in: target) }
+        lastAutoMove = nil
     }
 
     func addCategory() {
@@ -446,6 +502,13 @@ private struct ReviewStep: View {
                 .foregroundColor(.rpSlate)
                 .padding(.horizontal, 8).padding(.vertical, 4)
 
+                Toggle("Also move look-alike photos when I move one", isOn: $session.followLookAlikes)
+                    .font(.system(size: 11))
+                    .foregroundColor(.rpSlate)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 6)
+                    .help("Fix one photo from a set (e.g. a family group) and the rest of that set follows")
+
                 Text("PROBLEMS FOUND").font(.system(size: 10.5, weight: .semibold)).tracking(0.6).foregroundColor(.rpSlate)
                     .padding(.horizontal, 8).padding(.top, 14)
                 Button {
@@ -517,6 +580,24 @@ private struct ReviewStep: View {
             }
             .padding(.horizontal, 16)
             .frame(height: 52)
+            if let last = session.lastAutoMove {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                    Text("Also moved \(last.count) look-alike photo\(last.count == 1 ? "" : "s") to match your change.")
+                        .font(.system(size: 12))
+                    Spacer()
+                    Button("Undo") { session.undoLookAlikes() }
+                        .buttonStyle(RPButtonStyle())
+                    Button {
+                        session.lastAutoMove = nil
+                    } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.plain)
+                }
+                .foregroundColor(.rpInk)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.rpPaper)
+            }
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 200), spacing: 10)], spacing: 10) {
                     ForEach(ids, id: \.self) { id in

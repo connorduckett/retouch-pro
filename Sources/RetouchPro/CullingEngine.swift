@@ -36,6 +36,9 @@ struct PhotoAnalysis {
         var mouthWidth: Double = 0  // mouth width ÷ face width
         var size: Double            // face width ÷ photo width
         var quality: Double         // Vision face-capture quality 0…1
+        var yaw: Double = 0         // head turn in radians (0 = facing the camera)
+        var pitch: Double = 0
+        var centerY: Double = 0.5
     }
 
     var id: UUID
@@ -53,7 +56,33 @@ struct PhotoAnalysis {
     var timeline: Double = 0
     var moment = 0
 
+    /// People found by body shape — includes people facing away (e.g. ceremony guests).
+    var humanCount = 0
+
     var faceCount: Int { faces.count }
+
+    /// 0…1: how much this looks like a posed photo — everyone facing the camera, faces of similar
+    /// size lined up (family formals, wedding party), as opposed to a candid crowd.
+    var posed: Double {
+        let main = faces.filter { $0.size > 0.02 }
+        guard main.count >= 2 else { return 0 }
+        let frontal = Double(main.filter { abs($0.yaw) < 0.35 && abs($0.pitch) < 0.45 }.count) / Double(main.count)
+        let sizes = main.map(\.size)
+        let mean = sizes.reduce(0, +) / Double(sizes.count)
+        let sd = (sizes.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(sizes.count)).squareRoot()
+        let uniform = mean > 0 ? max(0, 1 - sd / mean) : 0
+        let ys = main.map(\.centerY)
+        let rowSpread = (ys.max() ?? 0) - (ys.min() ?? 0)
+        let rows = rowSpread < 0.35 ? 1.0 : 0.7
+        return frontal * (0.6 + 0.4 * uniform) * rows
+    }
+
+    /// 0…1: many people but few faces toward the camera — guests watching a ceremony, a dance floor.
+    var facingAway: Double {
+        guard humanCount >= 3 else { return 0 }
+        let frontal = faces.filter { abs($0.yaw) < 0.5 }.count
+        return max(0, 1 - Double(frontal) / Double(humanCount))
+    }
     func label(_ names: String...) -> Float { names.map { labels[$0] ?? 0 }.max() ?? 0 }
 }
 
@@ -96,7 +125,10 @@ enum CullingEngine {
         let landmarks = VNDetectFaceLandmarksRequest()
         let quality = VNDetectFaceCaptureQualityRequest()
         let print = VNGenerateImageFeaturePrintRequest()
-        try? handler.perform([classify, landmarks, print])
+        let humans = VNDetectHumanRectanglesRequest()
+        humans.upperBodyOnly = false
+        try? handler.perform([classify, landmarks, print, humans])
+        a.humanCount = (humans.results ?? []).filter { $0.confidence > 0.5 && $0.boundingBox.height > 0.08 }.count
 
         for obs in classify.results ?? [] where obs.confidence > 0.08 {
             a.labels[obs.identifier] = obs.confidence
@@ -112,6 +144,9 @@ enum CullingEngine {
         for (i, face) in faces.enumerated() {
             var info = PhotoAnalysis.Face(eyeOpenness: 1, mouthOpenness: 0, size: Double(face.boundingBox.width),
                                           quality: Double(i < qualities.count ? qualities[i].faceCaptureQuality ?? 0.5 : 0.5))
+            info.yaw = face.yaw?.doubleValue ?? 0
+            if #available(macOS 12.0, *) { info.pitch = face.pitch?.doubleValue ?? 0 }
+            info.centerY = Double(face.boundingBox.midY)
             if let lm = face.landmarks {
                 let left = ratio(lm.leftEye), right = ratio(lm.rightEye)
                 if let l = left, let r = right { info.eyeOpenness = max(l, r) }   // both must be shut to count

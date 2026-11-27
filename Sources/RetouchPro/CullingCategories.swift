@@ -46,39 +46,53 @@ enum CullingCategories {
 
         switch type {
         case .wedding:
+            // Typical day: getting ready → portraits/first look → ceremony → formals → reception.
+            let people: (PhotoAnalysis) -> Int = { max(faces($0), $0.humanCount) }
+            let dark: (PhotoAnalysis) -> Bool = { $0.brightness < 0.28 }
             return [
                 CategoryRule(key: "details", name: "Details & Décor") { a in
-                    (faces(a) == 0 ? 0.6 : 0) + detail(a) * (faces(a) <= 1 ? 1 : 0.4)
+                    (people(a) == 0 ? 0.6 : 0) + detail(a) * (faces(a) <= 1 ? 1 : 0.3)
                 },
                 CategoryRule(key: "ready", name: "Getting Ready") { a in
-                    (a.timeline < 0.3 ? 0.55 : a.timeline < 0.4 ? 0.2 : -0.3) + L(a, "interior_room") * 0.4
-                        + (1...4 ~= faces(a) ? 0.2 : 0) - L(a, "outdoor") * 0.3
+                    (a.timeline < 0.28 ? 0.55 : a.timeline < 0.38 ? 0.15 : -0.4) + L(a, "interior_room") * 0.35
+                        + (1...4 ~= faces(a) ? 0.2 : 0) - L(a, "outdoor") * 0.25 - a.posed * (faces(a) >= 4 ? 0.4 : 0)
                 },
                 CategoryRule(key: "bride", name: "Bride") { a in
-                    (faces(a) == 1 ? 0.45 : -0.4) + dress(a) * 1.1 - suit(a) * 0.9
+                    (faces(a) == 1 && a.humanCount <= 2 ? 0.45 : -0.4) + dress(a) * 1.1 - suit(a) * 0.9
                 },
                 CategoryRule(key: "groom", name: "Groom") { a in
-                    (faces(a) == 1 ? 0.45 : -0.4) + suit(a) * 1.1 - dress(a) * 0.9
+                    (faces(a) == 1 && a.humanCount <= 2 ? 0.45 : -0.4) + suit(a) * 1.1 - dress(a) * 0.9
                 },
                 CategoryRule(key: "bridesmaids", name: "Bridesmaids") { a in
-                    (faces(a) >= 3 ? 0.35 : -0.4) + L(a, "bridesmaid", "gown", "bouquet", "wedding_dress") * 1.0 - suit(a) * 0.8
+                    (faces(a) >= 3 ? 0.3 : -0.5) + a.posed * 0.3
+                        + L(a, "bridesmaid", "gown", "bouquet", "wedding_dress") * 0.9 - suit(a) * 0.9
                 },
                 CategoryRule(key: "groomsmen", name: "Groomsmen") { a in
-                    (faces(a) >= 3 ? 0.35 : -0.4) + suit(a) * 1.1 - dress(a) * 0.8
+                    (faces(a) >= 3 ? 0.3 : -0.5) + a.posed * 0.3 + suit(a) * 1.0 - dress(a) * 0.9
+                },
+                CategoryRule(key: "party", name: "Wedding Party") { a in
+                    // Bridesmaids and groomsmen together: a posed group with dresses AND suits.
+                    (faces(a) >= 5 ? 0.25 : -0.5) + a.posed * 0.45 + min(dress(a), suit(a)) * 0.9
                 },
                 CategoryRule(key: "ceremony", name: "Ceremony") { a in
-                    L(a, "ceremony") * 0.9 + L(a, "crowd") * 0.7 + (0.3...0.65 ~= a.timeline ? 0.3 : -0.2)
-                        + (faces(a) >= 5 ? 0.15 : 0)
+                    // Guests seen from behind, an aisle crowd, the middle of the day — and not posed.
+                    L(a, "ceremony") * 0.3 + L(a, "crowd") * 0.5 + a.facingAway * 0.65
+                        + (0.3...0.62 ~= a.timeline ? 0.3 : -0.3) - a.posed * 0.9 - L(a, "dancing", "nightclub") * 0.6
                 },
                 CategoryRule(key: "couple", name: "Couple Portraits") { a in
-                    (faces(a) == 2 ? 0.55 : -0.3) + min(dress(a), suit(a)) * 0.8 + L(a, "wedding") * 0.3
+                    (faces(a) == 2 && a.humanCount <= 3 ? 0.55 : -0.4) + min(dress(a), suit(a)) * 0.8 + L(a, "wedding") * 0.2
                 },
                 CategoryRule(key: "family", name: "Family Formals") { a in
-                    (faces(a) >= 4 ? 0.4 : -0.4) + (0.35...0.75 ~= a.timeline ? 0.2 : 0)
-                        + (L(a, "child") > 0.2 && L(a, "adult") > 0.2 ? 0.2 : 0) - L(a, "crowd") * 0.4
+                    // Posed groups facing the camera, usually right after the ceremony.
+                    (faces(a) >= 3 ? 0.3 : -0.5) + a.posed * 0.85 + (0.38...0.8 ~= a.timeline ? 0.15 : 0)
+                        + (L(a, "child") > 0.2 && L(a, "adult") > 0.2 ? 0.2 : 0)
+                        - party(a) * 0.6 - L(a, "crowd") * 0.3 - min(dress(a), suit(a)) * 0.25
                 },
                 CategoryRule(key: "reception", name: "Reception") { a in
-                    party(a) * 1.1 + (a.timeline > 0.65 ? 0.4 : -0.2) + (a.brightness < 0.3 ? 0.15 : 0)
+                    // Dancing, cake, toasts, dim light — late in the day, and candid rather than posed.
+                    party(a) * 1.1 + (a.timeline > 0.7 ? 0.3 : -0.3) + (dark(a) && a.posed < 0.5 ? 0.2 : 0)
+                        + (a.timeline > 0.7 ? a.facingAway * 0.3 : 0) - a.posed * 0.6
+                        - (L(a, "outdoor") > 0.3 && !dark(a) ? 0.2 : 0)
                 },
             ]
         case .engagement:
@@ -158,6 +172,8 @@ enum CullingCategories {
             for i in idx { for r in rules.indices { scores[i][r] = scores[i][r] * 0.7 + avg[r] * 0.3 } }
         }
 
+        if type == .wedding { adjustForCeremony(photos, rules: rules, scores: &scores) }
+
         var buckets: [String: [UUID]] = [:]
         for (i, p) in photos.enumerated() {
             let best = scores[i].indices.max { scores[i][$0] < scores[i][$1] }
@@ -175,6 +191,37 @@ enum CullingCategories {
             result.append(Category(key: otherKey, name: type == .wedding ? "Candids & Other" : "Other", photoIDs: other))
         }
         return result
+    }
+
+    /// Weddings follow a schedule: family formals happen right after the ceremony. Find the ceremony in
+    /// this shoot's timeline, then treat posed groups just after it as family and posed groups before it
+    /// as the wedding party.
+    private static func adjustForCeremony(_ photos: [PhotoAnalysis], rules: [CategoryRule], scores: inout [[Double]]) {
+        guard let ceremony = rules.firstIndex(where: { $0.key == "ceremony" }),
+              let family = rules.firstIndex(where: { $0.key == "family" }),
+              let party = rules.firstIndex(where: { $0.key == "party" }),
+              let ready = rules.firstIndex(where: { $0.key == "ready" }) else { return }
+        let ceremonyTimes = photos.indices
+            .filter { i in scores[i].indices.max { scores[i][$0] < scores[i][$1] } == ceremony && scores[i][ceremony] > 0.45 }
+            .map { photos[$0].timeline }
+            .sorted()
+        guard ceremonyTimes.count >= 8 else { return }
+        let start = ceremonyTimes[ceremonyTimes.count / 10]
+        let end = ceremonyTimes[ceremonyTimes.count * 9 / 10]
+        for i in photos.indices {
+            let p = photos[i]
+            guard p.faceCount >= 3, p.posed > 0.35 else { continue }
+            // Nobody poses for a group photo mid-ceremony, so posed groups from the ceremony onward
+            // (until the reception gets going) are the formals.
+            if p.timeline >= start && p.timeline < end + 0.15 {
+                scores[i][family] += 0.5
+                scores[i][party] -= 0.25
+                scores[i][ceremony] -= 0.4
+            } else if p.timeline < start {
+                scores[i][family] -= 0.6
+                if p.timeline < start * 0.4 { scores[i][ready] += 0.35 }   // e.g. the bride with her girls in the suite
+            }
+        }
     }
 
     /// For "Other" shoots: one category per moment, named after what's in it.
